@@ -495,6 +495,7 @@ window.stopAutoMode = async () => {
 
 // ══ LISTEN: Server phase display ══
 onValue(ref(db,'autoMode/phase'), s => {
+  if(!autoModeOn) return;
   const phase = s.val();
   const labels = {
     'countdown':'⏱ COUNTDOWN',
@@ -526,7 +527,8 @@ onValue(ref(db,'game/countdown'), s => {
 // ══ LISTEN: Auto mode on/off sync ══
 onValue(ref(db,'autoMode/on'), s => {
   const val = s.val();
-  if(val === true){
+  if(val === true && !autoModeOn){
+    // Server turned on externally — sync UI
     autoModeOn = true;
     document.getElementById('startAutoBtn').style.display = 'none';
     document.getElementById('stopAutoBtn').style.display = 'flex';
@@ -534,7 +536,7 @@ onValue(ref(db,'autoMode/on'), s => {
     document.getElementById('autoModeTitle').textContent = '🟢 SERVER AUTO — RUNNING';
     document.getElementById('autoModeTitle').classList.add('running');
     document.getElementById('autoStatusRow').style.display = 'flex';
-  } else {
+  } else if(val === false && autoModeOn){
     autoModeOn = false;
     document.getElementById('startAutoBtn').style.display = 'flex';
     document.getElementById('stopAutoBtn').style.display = 'none';
@@ -542,7 +544,6 @@ onValue(ref(db,'autoMode/on'), s => {
     document.getElementById('autoModeTitle').textContent = '🤖 AUTO MODE';
     document.getElementById('autoModeTitle').classList.remove('running');
     document.getElementById('autoStatusRow').style.display = 'none';
-    document.getElementById('autoCdVal').textContent = '—';
   }
 });
 
@@ -989,4 +990,4 @@ document.getElementById('botCountInput').oninput = function(){
 
 </script>
 </body>
-  </html>
+      </html>
