@@ -680,20 +680,43 @@ async function scheduleNextRound() {
   if(!autoModeOn) return;
   roundNumber++;
   setAutoStatusDisplay('🗑 CLEARING BOTS', 'ያሉ bots እየጸዱ ነው...');
-// ሁሉም cards ጽዳ — bots እና real players
-await set(ref(db,'game/confirmedNumbers'), null);
-await set(ref(db,'game/prize'), 0);
-await set(ref(db,'game/total'), 0);
-activeBots = {};
-renderBotGrid();
-const betSnap2 = await get(ref(db,'game/bet'));
-const pctSnap2 = await get(ref(db,'game/percent'));
-const newConf = await get(ref(db,'game/confirmedNumbers'));
-const realCount = Object.keys(newConf.val()||{}).length;
-const bet2 = betSnap2.val()||0;
-const pct2 = (pctSnap2.val()||80)/100;
-await set(ref(db,'game/prize'), Math.floor(bet2*realCount*pct2));
-await set(ref(db,'game/total'), bet2*realCount);
+
+  // ✅ Called numbers reset — አዲስ round ሲጀምር ያሮጌ ቁጥሮች ይጸዳሉ
+  await set(ref(db,'game/calledNumbers'), null);
+  await set(ref(db,'game/status'), {started: false});
+  await set(ref(db,'game/pendingWinner'), null);
+  await set(ref(db,'game/winners'), null);
+  await set(ref(db,'game/announcement'), null);
+  await set(ref(db,'game/paid'), false);
+  calledNumbers = [];
+  document.getElementById('ballsWrap').innerHTML = '<div class="empty">No numbers called yet</div>';
+  document.getElementById('bigNum').textContent = '—';
+  document.getElementById('statCalled').textContent = '0';
+  document.getElementById('statRemain').textContent = '75';
+
+  // ሁሉም cards ጽዳ — bots እና real players
+  await set(ref(db,'game/confirmedNumbers'), null);
+  await set(ref(db,'game/prize'), 0);
+  await set(ref(db,'game/total'), 0);
+
+  // Old bot users Firebase ውስጥ ይጸዳሉ
+  const usersSnap2 = await get(ref(db,'users'));
+  const usersData2 = usersSnap2.val() || {};
+  for(let uid in usersData2){
+    if(usersData2[uid].is_bot) await set(ref(db,'users/'+uid), null);
+  }
+  activeBots = {};
+  renderBotGrid();
+
+  const betSnap2 = await get(ref(db,'game/bet'));
+  const pctSnap2 = await get(ref(db,'game/percent'));
+  const newConf = await get(ref(db,'game/confirmedNumbers'));
+  const realCount = Object.keys(newConf.val()||{}).length;
+  const bet2 = betSnap2.val()||0;
+  const pct2 = (pctSnap2.val()||80)/100;
+  await set(ref(db,'game/prize'), Math.floor(bet2*realCount*pct2));
+  await set(ref(db,'game/total'), bet2*realCount);
+
   document.getElementById('roundNum').textContent = roundNumber;
   await set(ref(db,'autoMode/round'), roundNumber);
 
@@ -1054,15 +1077,7 @@ window.addBots=async()=>{
 
   // አሮጌው bot_ prefix ያላቸውን ስሞች exclude ማድረጊያ
   // አዲሱ — Firebase users ውስጥ is_bot=true ያላቸውን display names ማንበብ
-  const usersSnap = await get(ref(db,'users'));
-  const usersData = usersSnap.val() || {};
-  const usedBotNames = new Set(
-    Object.values(usersData)
-      .filter(u => u.is_bot)
-      .map(u => u.display)
-  );
-
-  const availNames=shuffle(ET_NAMES.filter(n=>!usedBotNames.has(n)));
+  const availNames = shuffle([...ET_NAMES]);
   if(!availNames.length||!avail.length){alert('❌ Cards or names exhausted!');return;}
 
   const botsToAdd=[];
@@ -1074,7 +1089,7 @@ window.addBots=async()=>{
 
   let added=0;
   for(let i=0;i<botsToAdd.length;i++){
-    const delay = 800 + Math.random() * 2200;
+    const delay = 800 + Math.random() * 1200;
     await new Promise(res => setTimeout(res, delay));
     const {cardId, botId, botName} = botsToAdd[i];
 
@@ -1285,4 +1300,4 @@ document.getElementById('botCountInput').oninput=function(){
 };
 </script>
 </body>
-  </html>
+        </html>
