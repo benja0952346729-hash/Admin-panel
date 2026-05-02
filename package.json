@@ -1,9 +1,9 @@
 {
   "name": "bingo-server",
   "version": "1.0.0",
-  "main": "worker.index.js",
+  "main": "Server.js",
   "scripts": {
-    "start": "node worker.index.js"
+    "start": "node Server.js"
   },
   "dependencies": {
     "firebase-admin": "^12.0.0",
