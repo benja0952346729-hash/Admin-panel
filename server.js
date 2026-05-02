@@ -6,7 +6,47 @@ const path = require('path');
 app.use(express.static(__dirname));
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 app.listen(process.env.PORT || 3000);
+app.use(express.json());
 
+app.post('/confirm-card', async (req, res) => {
+  const { userId, cardId } = req.body;
+  if(!userId || !cardId) return res.json({ok:false, msg:'Missing data'});
+
+  try {
+    const betSnap = await db.ref('game/bet').get();
+    const bet = betSnap.val() || 0;
+
+    const balSnap = await db.ref('users/'+userId+'/balance').get();
+    const bal = balSnap.val() || 0;
+
+    if(bal < bet) return res.json({ok:false, msg:'❌ Balance አንስተኛ ነው!'});
+
+    const statusSnap = await db.ref('game/status').get();
+    if(statusSnap.val()?.started) return res.json({ok:false, msg:'❌ Game ጀምሯል!'});
+
+    const confSnap = await db.ref('game/confirmedNumbers').get();
+    const data = confSnap.val() || {};
+
+    if(data[String(cardId)]) return res.json({ok:false, msg:'❌ Card ተይዟል!'});
+
+    const myCards = Object.values(data).filter(v => String(v) === String(userId));
+    if(myCards.length >= 5) return res.json({ok:false, msg:'❌ Max 5 cards!'});
+
+    await db.ref('game/confirmedNumbers/'+cardId).set(userId);
+    await db.ref('users/'+userId+'/balance').set(bal - bet);
+
+    const newConf = await db.ref('game/confirmedNumbers').get();
+    const total = Object.keys(newConf.val()||{}).length;
+    const pctSnap = await db.ref('game/percent').get();
+    const pct = (pctSnap.val()||80)/100;
+    await db.ref('game/prize').set(Math.floor(bet * total * pct));
+    await db.ref('game/total').set(bet * total);
+
+    return res.json({ok:true, msg:'✅ Card confirmed!'});
+  } catch(e) {
+    return res.json({ok:false, msg:'Error: '+e.message});
+  }
+});
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
