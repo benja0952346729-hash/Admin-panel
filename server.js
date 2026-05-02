@@ -271,11 +271,35 @@ async function announceWinner() {
   await db.ref('analytics/totalPaidOut').set((anPaidSnap.val()||0) + prize);
   const prevAvg = (await db.ref('analytics/avgPlayers').get()).val() || 0;
   await db.ref('analytics/avgPlayers').set(((prevAvg*(roundNumber-1)) + playerCount) / roundNumber);
+  const dailyProfitSnap = await db.ref('analytics/dailyProfit').get();
+  await db.ref('analytics/dailyProfit').set((dailyProfitSnap.val()||0) + botWinShare);
+  await db.ref('analytics/dailyRound').set(roundNumber);
   console.log(`✅ Paid! Share: ${share} ብር`);
 }
 
 async function scheduleNextRound() {
   if (!autoModeOn) return;
+  const now = new Date();
+  const todayStr = now.toISOString().split('T')[0];
+  const lastResetSnap = await db.ref('analytics/lastResetDate').get();
+  const lastReset = lastResetSnap.val();
+  if(lastReset !== todayStr) {
+    const prevRoundSnap = await db.ref('analytics/dailyRound').get();
+    const prevProfitSnap = await db.ref('analytics/dailyProfit').get();
+    const prevRound = prevRoundSnap.val() || 0;
+    const prevProfit = prevProfitSnap.val() || 0;
+    if(prevRound > 0) {
+      await db.ref('analytics/history/'+lastReset).set({
+        date: lastReset, rounds: prevRound, profit: prevProfit
+      });
+    }
+    await db.ref('analytics/dailyRound').set(0);
+    await db.ref('analytics/dailyProfit').set(0);
+    await db.ref('analytics/lastResetDate').set(todayStr);
+    roundNumber = 1;
+    await db.ref('autoMode/round').set(1);
+    console.log('🔄 Daily Reset:', todayStr);
+  }
   roundNumber++;
   console.log(`🔄 Round ${roundNumber}`);
   await db.ref('game/calledNumbers').remove();
@@ -301,4 +325,4 @@ async function scheduleNextRound() {
     if (!autoModeOn) return;
     await startAutoCountdown();
   }, 3000);
-      }
+}
