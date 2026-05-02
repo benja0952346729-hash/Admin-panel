@@ -529,27 +529,21 @@ window.startAutoMode = async () => {
   document.getElementById('startAutoBtn').style.display = 'none';
   document.getElementById('stopAutoBtn').style.display = 'flex';
   document.getElementById('autoModeBox').classList.add('active-auto');
-  document.getElementById('autoModeTitle').textContent = '🟢 AUTO MODE — RUNNING';
+  document.getElementById('autoModeTitle').textContent = '🟢 SERVER AUTO — RUNNING';
   document.getElementById('autoModeTitle').classList.add('running');
   document.getElementById('autoStatusRow').style.display = 'flex';
 
-  // Save auto mode state to Firebase so player screen knows
+  const callSpeed = parseInt(document.getElementById('autoCallSpeed').value) || 6000;
+
+  // Server ያስተዳድራል
   await set(ref(db,'autoMode/on'), true);
   await set(ref(db,'autoMode/cdMinutes'), autoCdMinutes);
+  await set(ref(db,'autoMode/callSpeed'), callSpeed);
 
-  // Start first countdown
-  startAutoCountdown();
+  setAutoStatusDisplay('🚀 SERVER RUNNING', 'Railway server game ያስተዳድራል — browser ዝጋ ምንም!');
 };
-
 window.stopAutoMode = async () => {
   autoModeOn = false;
-  clearTimeout(autoTimer);
-  clearInterval(autoTimer);
-  autoTimer = null;
-  clearInterval(autoAnnounceTimer);
-  autoAnnounceTimer = null;
-  autoPhase = 'idle';
-
   document.getElementById('startAutoBtn').style.display = 'flex';
   document.getElementById('stopAutoBtn').style.display = 'none';
   document.getElementById('autoModeBox').classList.remove('active-auto');
@@ -560,7 +554,6 @@ window.stopAutoMode = async () => {
   await set(ref(db,'autoMode/on'), false);
   await set(ref(db,'game/countdown'), {active:false});
 };
-
 async function startAutoCountdown() {
   if(!autoModeOn) return;
   autoPhase = 'countdown';
@@ -1300,4 +1293,4 @@ document.getElementById('botCountInput').oninput=function(){
 };
 </script>
 </body>
-        </html>
+  </html>
