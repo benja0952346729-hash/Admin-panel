@@ -475,9 +475,7 @@ window.startAutoMode = async () => {
   await set(ref(db,'autoMode/on'), true);
   await set(ref(db,'autoMode/cdMinutes'), autoCdMinutes);
   await set(ref(db,'autoMode/callSpeed'), callSpeed);
-
-  document.getElementById('autoPhaseVal').textContent = '🚀 SERVER RUNNING';
-  document.getElementById('autoPhaseDesc').textContent = 'Railway server game ያስተዳድራል — browser ዝጋ ምንም!';
+  // Phase display — Firebase listener ያሻሻለዋል
 };
 
 window.stopAutoMode = async () => {
@@ -495,7 +493,6 @@ window.stopAutoMode = async () => {
 
 // ══ LISTEN: Server phase display ══
 onValue(ref(db,'autoMode/phase'), s => {
-  if(!autoModeOn) return;
   const phase = s.val();
   const labels = {
     'countdown':'⏱ COUNTDOWN',
@@ -503,22 +500,53 @@ onValue(ref(db,'autoMode/phase'), s => {
     'announcing':'🏆 ANNOUNCING',
     'idle':'💤 IDLE'
   };
+  const descs = {
+    'countdown':'⏳ Game ሲጀምር countdown ይቆጥራል...',
+    'playing':'🎲 Numbers እየተጠሩ ነው',
+    'announcing':'🏆 አሸናፊ እየተወጀ ነው...',
+    'idle':'💤 እረፍት ላይ ነው'
+  };
   document.getElementById('autoPhaseVal').textContent = labels[phase] || '—';
-  document.getElementById('autoPhaseDesc').textContent = 'Railway server ያስተዳድራል';
+  document.getElementById('autoPhaseDesc').textContent = descs[phase] || 'Railway server ያስተዳድራል';
+
+  // Game እየሄደ ሲሆን TIME ቦታ ላይ status አሳይ
+  if(phase === 'playing'){
+    document.getElementById('autoCdVal').textContent = '🎮';
+    document.getElementById('autoCdVal').style.fontSize = '2rem';
+  } else if(phase === 'announcing'){
+    document.getElementById('autoCdVal').textContent = '🏆';
+    document.getElementById('autoCdVal').style.fontSize = '2rem';
+  } else {
+    document.getElementById('autoCdVal').style.fontSize = '3rem';
+  }
 });
 
 // ══ LISTEN: Countdown display ══
 onValue(ref(db,'game/countdown'), s => {
   const val = s.val();
   clearInterval(autoTimer);
+
   if(!val || !val.active || !val.startAt){
-    document.getElementById('autoCdVal').textContent = '—';
+    // Game እየሄደ ሊሆን ይችላል — phase check
+    const phase = document.getElementById('autoPhaseVal').textContent;
+    if(!phase.includes('PLAYING') && !phase.includes('ANNOUNCING')){
+      document.getElementById('autoCdVal').textContent = '—';
+    }
     return;
   }
+
+  // startAt ያለፈ ከሆነ skip
+  if(val.startAt <= Date.now()){
+    document.getElementById('autoCdVal').textContent = '00:00';
+    return;
+  }
+
   function tick(){
     const remain = Math.max(0, Math.floor((val.startAt - Date.now()) / 1000));
-    document.getElementById('autoCdVal').textContent = fmtSecs(remain);
-    if(remain <= 0) clearInterval(autoTimer);
+    const el = document.getElementById('autoCdVal');
+    el.textContent = fmtSecs(remain);
+    el.style.color = remain <= 30 ? 'var(--red)' : 'var(--gold)';
+    if(remain <= 0){ clearInterval(autoTimer); el.textContent = '00:00'; }
   }
   tick();
   autoTimer = setInterval(tick, 1000);
@@ -527,8 +555,7 @@ onValue(ref(db,'game/countdown'), s => {
 // ══ LISTEN: Auto mode on/off sync ══
 onValue(ref(db,'autoMode/on'), s => {
   const val = s.val();
-  if(val === true && !autoModeOn){
-    // Server turned on externally — sync UI
+  if(val === true){
     autoModeOn = true;
     document.getElementById('startAutoBtn').style.display = 'none';
     document.getElementById('stopAutoBtn').style.display = 'flex';
@@ -536,7 +563,7 @@ onValue(ref(db,'autoMode/on'), s => {
     document.getElementById('autoModeTitle').textContent = '🟢 SERVER AUTO — RUNNING';
     document.getElementById('autoModeTitle').classList.add('running');
     document.getElementById('autoStatusRow').style.display = 'flex';
-  } else if(val === false && autoModeOn){
+  } else {
     autoModeOn = false;
     document.getElementById('startAutoBtn').style.display = 'flex';
     document.getElementById('stopAutoBtn').style.display = 'none';
@@ -544,6 +571,7 @@ onValue(ref(db,'autoMode/on'), s => {
     document.getElementById('autoModeTitle').textContent = '🤖 AUTO MODE';
     document.getElementById('autoModeTitle').classList.remove('running');
     document.getElementById('autoStatusRow').style.display = 'none';
+    document.getElementById('autoCdVal').textContent = '—';
   }
 });
 
@@ -990,4 +1018,4 @@ document.getElementById('botCountInput').oninput = function(){
 
 </script>
 </body>
-      </html>
+    </html>
