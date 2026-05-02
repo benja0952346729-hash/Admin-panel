@@ -219,11 +219,12 @@ select{background:#0a0f1c;border:1px solid var(--border);color:var(--text);paddi
   <div class="call-speed-row">
     <label>Number call speed:</label>
     <select id="autoCallSpeed">
-      <option value="4000">4 sec</option>
-      <option value="6000" selected>6 sec</option>
-      <option value="8000">8 sec</option>
-      <option value="10000">10 sec</option>
-    </select>
+  <option value="1000">1 sec</option>
+  <option value="4000">4 sec</option>
+  <option value="6000" selected>6 sec</option>
+  <option value="8000">8 sec</option>
+  <option value="10000">10 sec</option>
+</select>
   </div>
 
   <div class="btn-row" style="margin-bottom:10px;">
@@ -361,7 +362,11 @@ select{background:#0a0f1c;border:1px solid var(--border);color:var(--text);paddi
     <span style="font-size:0.82rem;color:var(--muted)">Total Withdrawals: <b style="color:var(--red)" id="anTotalWithdrawals">0</b> ብር</span>
   </div>
 </div>
-
+<!-- ══ DAILY HISTORY ══ -->
+<div class="section">
+  <div class="sec-title">📅 Daily History</div>
+  <div id="dailyHistoryList"><div class="empty">Loading...</div></div>
+</div>
 <!-- ══ WINNER HISTORY ══ -->
 <div class="section">
   <div class="sec-title">🏆 Winner History</div>
@@ -495,7 +500,6 @@ window.stopAutoMode = async () => {
 
 // ══ LISTEN: Server phase display ══
 onValue(ref(db,'autoMode/phase'), s => {
-  if(!autoModeOn) return;
   const phase = s.val();
   const labels = {
     'countdown':'⏱ COUNTDOWN',
@@ -527,8 +531,7 @@ onValue(ref(db,'game/countdown'), s => {
 // ══ LISTEN: Auto mode on/off sync ══
 onValue(ref(db,'autoMode/on'), s => {
   const val = s.val();
-  if(val === true && !autoModeOn){
-    // Server turned on externally — sync UI
+  if(val === true){
     autoModeOn = true;
     document.getElementById('startAutoBtn').style.display = 'none';
     document.getElementById('stopAutoBtn').style.display = 'flex';
@@ -536,7 +539,7 @@ onValue(ref(db,'autoMode/on'), s => {
     document.getElementById('autoModeTitle').textContent = '🟢 SERVER AUTO — RUNNING';
     document.getElementById('autoModeTitle').classList.add('running');
     document.getElementById('autoStatusRow').style.display = 'flex';
-  } else if(val === false && autoModeOn){
+  } else {
     autoModeOn = false;
     document.getElementById('startAutoBtn').style.display = 'flex';
     document.getElementById('stopAutoBtn').style.display = 'none';
@@ -544,6 +547,7 @@ onValue(ref(db,'autoMode/on'), s => {
     document.getElementById('autoModeTitle').textContent = '🤖 AUTO MODE';
     document.getElementById('autoModeTitle').classList.remove('running');
     document.getElementById('autoStatusRow').style.display = 'none';
+    document.getElementById('autoCdVal').textContent = '—';
   }
 });
 
@@ -639,6 +643,25 @@ onValue(ref(db,'analytics/totalDeposits'), s => { document.getElementById('anTot
 onValue(ref(db,'analytics/totalWithdrawals'), s => { document.getElementById('anTotalWithdrawals').textContent = s.val()||0; });
 onValue(ref(db,'analytics/avgPlayers'), s => { document.getElementById('anAvgPlayers').textContent = (s.val()||0).toFixed(1); });
 onValue(ref(db,'analytics/totalProfit'), s => { document.getElementById('anGameProfit').textContent = s.val()||0; });
+onValue(ref(db,'analytics/totalProfit'), s => { document.getElementById('anGameProfit').textContent = s.val()||0; });
+
+onValue(ref(db,'analytics/history'), s => {
+  const box = document.getElementById('dailyHistoryList');
+  const data = s.val();
+  if(!data){ box.innerHTML = '<div class="empty">No history yet</div>'; return; }
+  const entries = Object.entries(data).sort((a,b)=>b[0].localeCompare(a[0]));
+  box.innerHTML = '';
+  entries.forEach(([date, val]) => {
+    const d = document.createElement('div');
+    d.className = 'player-item';
+    d.innerHTML = `
+      <span style="color:var(--cyan);font-weight:700;">📅 ${date}</span>
+      <span style="color:var(--muted)">Rounds: <b style="color:var(--gold)">${val.rounds||0}</b></span>
+      <span style="color:var(--muted)">Profit: <b style="color:var(--green)">${val.profit||0}</b> ብር</span>
+    `;
+    box.appendChild(d);
+  });
+});
 onValue(ref(db,'analytics/botWinProfit'), s => { document.getElementById('anBotProfit').textContent = s.val()||0; });
 
 // ══ LISTEN: Payments ══
@@ -990,4 +1013,4 @@ document.getElementById('botCountInput').oninput = function(){
 
 </script>
 </body>
-  </html>
+      </html>
