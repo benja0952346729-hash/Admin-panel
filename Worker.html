@@ -85,6 +85,7 @@ db.ref('autoMode/on').on('value', async snap => {
     autoModeOn = false;
     clearAllTimers();
     autoPhase = 'idle';
+    await db.ref('autoMode/phase').set('idle');
     console.log('⏹ Auto Mode OFF');
   }
 });
@@ -224,6 +225,7 @@ async function startAutoAnnounce() {
   if (!autoModeOn) return;
   autoPhase = 'announcing';
   clearAllTimers();
+  await db.ref('autoMode/phase').set('announcing');
 
   const pendSnap = await db.ref('game/pendingWinner').get();
   const data = pendSnap.val();
@@ -244,7 +246,7 @@ async function startAutoAnnounce() {
   }
 }
 
-// ── Announce & Pay ──
+// ── Step 5: Pay Winners ──
 async function announceWinner() {
   const pendSnap = await db.ref('game/pendingWinner').get();
   const data = pendSnap.val();
@@ -256,14 +258,21 @@ async function announceWinner() {
   let botWinShare = 0;
 
   for (let w of winners) {
-    if (w.isBot) { botWinShare += share; continue; }
+    if (w.isBot) {
+      botWinShare += share;
+      continue;
+    }
+    // Real winner — balance ይጨምር
     const uRef = db.ref('users/' + w.user + '/balance');
     const s = await uRef.get();
     await uRef.set((s.val() || 0) + share);
+
+    // Profit ይቀነሳል
     const profSnap = await db.ref('analytics/totalProfit').get();
     await db.ref('analytics/totalProfit').set(Math.max(0, (profSnap.val() || 0) - share));
   }
 
+  // Bot ካሸነፈ profit ይጨምራል
   if (botWinShare > 0) {
     const profSnap = await db.ref('analytics/totalProfit').get();
     await db.ref('analytics/totalProfit').set((profSnap.val() || 0) + botWinShare);
@@ -273,8 +282,11 @@ async function announceWinner() {
 
   const winnersWithPrize = {};
   winners.forEach((w, i) => { winnersWithPrize[i] = { ...w, prize: share }; });
+
   await db.ref('game/winners').set(winnersWithPrize);
-  await db.ref('game/announcement').set({ type: 'winner', winners, prize, share, time: Date.now() });
+  await db.ref('game/announcement').set({
+    type: 'winner', winners, prize, share, time: Date.now()
+  });
   await db.ref('game/paid').set(true);
   await db.ref('game/pendingWinner/announced').set(true);
   await db.ref('game/status').set({ started: false, waitingRestart: true });
@@ -293,7 +305,7 @@ async function announceWinner() {
   console.log(`✅ Paid! Share: ${share} ብር`);
 }
 
-// ── Step 5: Next Round ──
+// ── Step 6: Next Round ──
 async function scheduleNextRound() {
   if (!autoModeOn) return;
   roundNumber++;
@@ -320,6 +332,7 @@ async function scheduleNextRound() {
   }
 
   await db.ref('autoMode/round').set(roundNumber);
+  await db.ref('autoMode/phase').set('countdown');
 
   setTimeout(async () => {
     if (!autoModeOn) return;
