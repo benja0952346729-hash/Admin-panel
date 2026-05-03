@@ -1,5 +1,6 @@
 const admin = require('firebase-admin');
 const express = require('express');
+const cors = require('cors');
 const app = express();
 const path = require('path');
 
@@ -10,12 +11,12 @@ admin.initializeApp({
 });
 const db = admin.database();
 
+app.use(cors());
 app.use(express.static(__dirname));
 app.use(express.json());
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
-app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
+app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
 
-// ✅ app.listen በፊት ነው!
 app.post('/confirm-card', async (req, res) => {
   const { userId, cardId } = req.body;
   if (!userId || !cardId) return res.json({ ok: false, msg: 'Missing data' });
@@ -27,8 +28,7 @@ app.post('/confirm-card', async (req, res) => {
     const balSnap = await db.ref('users/' + userId + '/balance').get();
     const bal = balSnap.val() || 0;
 
-    // bet 0 ከሆነ ነፃ — balance check አያስፈልግም
-    if (bet > 0 && bal < bet) return res.json({ ok: false, msg: '❌ Balance አንስተኛ ነው! (' + bal + ' ብር አለህ፣ ' + bet + ' ብር ያስፈልጋል)' });
+    if (bal < bet) return res.json({ ok: false, msg: '❌ Balance አንስተኛ ነው!' });
 
     const statusSnap = await db.ref('game/status').get();
     if (statusSnap.val()?.started) return res.json({ ok: false, msg: '❌ Game ጀምሯል!' });
@@ -42,9 +42,7 @@ app.post('/confirm-card', async (req, res) => {
     if (myCards.length >= 5) return res.json({ ok: false, msg: '❌ Max 5 cards!' });
 
     await db.ref('game/confirmedNumbers/' + cardId).set(userId);
-    if (bet > 0) {
-      await db.ref('users/' + userId + '/balance').set(bal - bet);
-    }
+    await db.ref('users/' + userId + '/balance').set(bal - bet);
 
     const newConf = await db.ref('game/confirmedNumbers').get();
     const total = Object.keys(newConf.val() || {}).length;
@@ -58,9 +56,6 @@ app.post('/confirm-card', async (req, res) => {
     return res.json({ ok: false, msg: 'Error: ' + e.message });
   }
 });
-
-// ✅ Routes ሁሉም ከዚህ በፊት ናቸው
-app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
 
 let autoModeOn = false;
 let autoCdMinutes = 3;
@@ -117,6 +112,7 @@ function clearAllTimers() {
   clearInterval(announceTimer); announceTimer = null;
 }
 
+// AUTO MODE LISTENER
 db.ref('autoMode/on').on('value', async snap => {
   const val = snap.val();
   if (val === true && !autoModeOn) {
@@ -332,4 +328,4 @@ async function scheduleNextRound() {
     if (!autoModeOn) return;
     await startAutoCountdown();
   }, 3000);
-  }
+    }
