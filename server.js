@@ -3,6 +3,7 @@ const express = require('express');
 const app = express();
 const path = require('path');
 
+// ── FIREBASE INIT ──
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -10,51 +11,59 @@ admin.initializeApp({
 });
 const db = admin.database();
 
+// ── EXPRESS SETUP ──
 app.use(express.static(__dirname));
 app.use(express.json());
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
+app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'admin.html')));
 app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
 
+// ══════════════════════════════════════════════
+// POST /confirm-card
+// ══════════════════════════════════════════════
 app.post('/confirm-card', async (req, res) => {
   const { userId, cardId } = req.body;
-  if(!userId || !cardId) return res.json({ok:false, msg:'Missing data'});
+  if (!userId || !cardId) return res.json({ ok: false, msg: 'Missing data' });
 
   try {
     const betSnap = await db.ref('game/bet').get();
     const bet = betSnap.val() || 0;
 
-    const balSnap = await db.ref('users/'+userId+'/balance').get();
+    const balSnap = await db.ref('users/' + userId + '/balance').get();
     const bal = balSnap.val() || 0;
 
-    if(bal < bet) return res.json({ok:false, msg:'❌ Balance አንስተኛ ነው!'});
+    if (bal < bet) return res.json({ ok: false, msg: '❌ Balance አንስተኛ ነው!' });
 
     const statusSnap = await db.ref('game/status').get();
-    if(statusSnap.val()?.started) return res.json({ok:false, msg:'❌ Game ጀምሯል!'});
+    if (statusSnap.val()?.started) return res.json({ ok: false, msg: '❌ Game ጀምሯል!' });
 
     const confSnap = await db.ref('game/confirmedNumbers').get();
     const data = confSnap.val() || {};
 
-    if(data[String(cardId)]) return res.json({ok:false, msg:'❌ Card ተይዟል!'});
+    if (data[String(cardId)]) return res.json({ ok: false, msg: '❌ Card ተይዟል!' });
 
     const myCards = Object.values(data).filter(v => String(v) === String(userId));
-    if(myCards.length >= 5) return res.json({ok:false, msg:'❌ Max 5 cards!'});
+    if (myCards.length >= 5) return res.json({ ok: false, msg: '❌ Max 5 cards!' });
 
-    await db.ref('game/confirmedNumbers/'+cardId).set(userId);
-    await db.ref('users/'+userId+'/balance').set(bal - bet);
+    await db.ref('game/confirmedNumbers/' + cardId).set(userId);
+    await db.ref('users/' + userId + '/balance').set(bal - bet);
 
     const newConf = await db.ref('game/confirmedNumbers').get();
-    const total = Object.keys(newConf.val()||{}).length;
+    const total = Object.keys(newConf.val() || {}).length;
     const pctSnap = await db.ref('game/percent').get();
-    const pct = (pctSnap.val()||80)/100;
+    const pct = (pctSnap.val() || 80) / 100;
     await db.ref('game/prize').set(Math.floor(bet * total * pct));
     await db.ref('game/total').set(bet * total);
 
-    return res.json({ok:true, msg:'✅ Card confirmed!'});
-  } catch(e) {
-    return res.json({ok:false, msg:'Error: '+e.message});
+    return res.json({ ok: true, msg: '✅ Card confirmed!' });
+  } catch (e) {
+    return res.json({ ok: false, msg: 'Error: ' + e.message });
   }
 });
 
+// ══════════════════════════════════════════════
+// AUTO MODE STATE
+// ══════════════════════════════════════════════
 let autoModeOn = false;
 let autoCdMinutes = 3;
 let calledNumbers = [];
@@ -65,6 +74,7 @@ let roundNumber = 1;
 
 console.log('🚀 Bingo Server Started!');
 
+// ── HELPERS ──
 function getLetter(n) {
   if (n <= 15) return 'B';
   if (n <= 30) return 'I';
@@ -83,24 +93,24 @@ function generateBoard(seed) {
     }
     return arr;
   }
-  let B = getNums(1,15,seed+1), I = getNums(16,30,seed+2),
-      N = getNums(31,45,seed+3), G = getNums(46,60,seed+4),
-      O = getNums(61,75,seed+5);
+  let B = getNums(1, 15, seed + 1), I = getNums(16, 30, seed + 2),
+    N = getNums(31, 45, seed + 3), G = getNums(46, 60, seed + 4),
+    O = getNums(61, 75, seed + 5);
   let b = [];
-  for (let i = 0; i < 5; i++) b.push(B[i],I[i],N[i],G[i],O[i]);
+  for (let i = 0; i < 5; i++) b.push(B[i], I[i], N[i], G[i], O[i]);
   b[12] = 'FREE';
   return b;
 }
 
 function checkWin(board, called) {
   const g = [];
-  for (let i = 0; i < 5; i++) g.push(board.slice(i*5, (i+1)*5));
+  for (let i = 0; i < 5; i++) g.push(board.slice(i * 5, (i + 1) * 5));
   for (let r = 0; r < 5; r++)
-    if (g[r].every(n => n==='FREE' || called.includes(n))) return true;
+    if (g[r].every(n => n === 'FREE' || called.includes(n))) return true;
   for (let c = 0; c < 5; c++)
-    if ([0,1,2,3,4].every(r => g[r][c]==='FREE' || called.includes(g[r][c]))) return true;
-  if ([0,1,2,3,4].every(i => g[i][i]==='FREE' || called.includes(g[i][i]))) return true;
-  if ([0,1,2,3,4].every(i => g[i][4-i]==='FREE' || called.includes(g[i][4-i]))) return true;
+    if ([0, 1, 2, 3, 4].every(r => g[r][c] === 'FREE' || called.includes(g[r][c]))) return true;
+  if ([0, 1, 2, 3, 4].every(i => g[i][i] === 'FREE' || called.includes(g[i][i]))) return true;
+  if ([0, 1, 2, 3, 4].every(i => g[i][4 - i] === 'FREE' || called.includes(g[i][4 - i]))) return true;
   return false;
 }
 
@@ -110,17 +120,24 @@ function clearAllTimers() {
   clearInterval(announceTimer); announceTimer = null;
 }
 
+// ══════════════════════════════════════════════
 // AUTO MODE LISTENER
+// ══════════════════════════════════════════════
 db.ref('autoMode/on').on('value', async snap => {
   const val = snap.val();
+
   if (val === true && !autoModeOn) {
     autoModeOn = true;
     console.log('✅ Auto Mode ON');
+
     const cdSnap = await db.ref('autoMode/cdMinutes').get();
     autoCdMinutes = cdSnap.val() || 3;
+
     const rSnap = await db.ref('autoMode/round').get();
     roundNumber = rSnap.val() || 1;
+
     startAutoCountdown();
+
   } else if (val === false && autoModeOn) {
     autoModeOn = false;
     clearAllTimers();
@@ -129,25 +146,43 @@ db.ref('autoMode/on').on('value', async snap => {
   }
 });
 
+// ══════════════════════════════════════════════
+// COUNTDOWN
+// ══════════════════════════════════════════════
 async function startAutoCountdown() {
   if (!autoModeOn) return;
   clearAllTimers();
+
   const secs = autoCdMinutes * 60;
   const startAt = Date.now() + secs * 1000;
-  await db.ref('game/countdown').set({ active: true, startAt, mins: autoCdMinutes, autoStart: true });
+
+  await db.ref('game/countdown').set({
+    active: true,
+    startAt,
+    mins: autoCdMinutes,
+    autoStart: true
+  });
   await db.ref('autoMode/phase').set('countdown');
   console.log(`⏱ Countdown: ${autoCdMinutes} min`);
+
   let remain = secs;
   countdownTimer = setInterval(async () => {
     if (!autoModeOn) { clearInterval(countdownTimer); return; }
     remain--;
-    if (remain <= 0) { clearInterval(countdownTimer); await startAutoGame(); }
+    if (remain <= 0) {
+      clearInterval(countdownTimer);
+      await startAutoGame();
+    }
   }, 1000);
 }
 
+// ══════════════════════════════════════════════
+// START GAME
+// ══════════════════════════════════════════════
 async function startAutoGame() {
   if (!autoModeOn) return;
   calledNumbers = [];
+
   await db.ref('game/countdown').set({ active: false });
   await db.ref('game/status').set({ started: true, autoStarted: true });
   await db.ref('game/calledNumbers').remove();
@@ -156,76 +191,103 @@ async function startAutoGame() {
   await db.ref('game/announcement').remove();
   await db.ref('game/paid').set(false);
   await db.ref('autoMode/phase').set('playing');
+
   console.log('🎮 Game Started!');
+
   const speedSnap = await db.ref('autoMode/callSpeed').get();
   const callSpeed = speedSnap.val() || 6000;
   autoCallNumber(callSpeed);
 }
 
+// ══════════════════════════════════════════════
+// AUTO CALL NUMBER
+// ══════════════════════════════════════════════
 function autoCallNumber(speed) {
   if (!autoModeOn) return;
   clearInterval(callTimer);
+
   callTimer = setInterval(async () => {
     if (!autoModeOn) { clearInterval(callTimer); return; }
+
     const pendSnap = await db.ref('game/pendingWinner').get();
     if (pendSnap.val() && !pendSnap.val().announced) {
       clearInterval(callTimer);
       startAutoAnnounce();
       return;
     }
+
     const used = new Set(calledNumbers);
-    const remaining = [...Array(75)].map((_,i) => i+1).filter(n => !used.has(n));
+    const remaining = [...Array(75)].map((_, i) => i + 1).filter(n => !used.has(n));
+
     if (!remaining.length) {
       clearInterval(callTimer);
       await scheduleNextRound();
       return;
     }
+
     const n = remaining[Math.floor(Math.random() * remaining.length)];
     calledNumbers.push(n);
     await db.ref('game/calledNumbers').push(n);
     console.log(`📢 ${getLetter(n)}${n}`);
+
     const totalSnap = await db.ref('game/total').get();
     const pctSnap = await db.ref('game/percent').get();
-    const prize = Math.floor((totalSnap.val()||0) * ((pctSnap.val()||80)/100));
+    const prize = Math.floor((totalSnap.val() || 0) * ((pctSnap.val() || 80) / 100));
     await db.ref('game/prize').set(prize);
+
     await checkWinners();
   }, speed);
 }
 
+// ══════════════════════════════════════════════
+// CHECK WINNERS
+// ══════════════════════════════════════════════
 async function checkWinners() {
   const paidSnap = await db.ref('game/paid').get();
   if (paidSnap.val()) return;
+
   const confSnap = await db.ref('game/confirmedNumbers').get();
   const allCards = confSnap.val() || {};
   const winners = [];
+
   for (let id in allCards) {
     const board = generateBoard(Number(id));
     if (checkWin(board, calledNumbers)) {
       const uid = allCards[id];
-      const isBotSnap = await db.ref('users/'+uid+'/is_bot').get();
+      const isBotSnap = await db.ref('users/' + uid + '/is_bot').get();
       const isBot = isBotSnap.val() === true;
-      const displaySnap = await db.ref('users/'+uid+'/display').get();
+      const displaySnap = await db.ref('users/' + uid + '/display').get();
       const name = displaySnap.val() || String(uid);
       winners.push({ user: uid, displayName: name, cardId: id, isBot, time: Date.now() });
     }
   }
+
   if (winners.length > 0) {
     clearInterval(callTimer);
     const prizeSnap = await db.ref('game/prize').get();
     const prize = prizeSnap.val() || 0;
-    await db.ref('game/pendingWinner').set({ winners, prize, announced: false, time: Date.now() });
-    console.log(`🏆 Winner found!`);
+    await db.ref('game/pendingWinner').set({
+      winners, prize, announced: false, time: Date.now()
+    });
+    console.log(`🏆 Winner found! ${winners.map(w => w.displayName).join(', ')}`);
     startAutoAnnounce();
   }
 }
 
+// ══════════════════════════════════════════════
+// AUTO ANNOUNCE — 5 ሰኮንድ ቆጠራ
+// ══════════════════════════════════════════════
 async function startAutoAnnounce() {
   if (!autoModeOn) return;
   clearAllTimers();
   await db.ref('autoMode/phase').set('announcing');
+
   let count = 5;
+  console.log(`⏳ Announcing in ${count}s...`);
+
   announceTimer = setInterval(async () => {
     count--;
+    console.log(`⏳ Announce in ${count}s`);
     if (count <= 0) {
       clearInterval(announceTimer);
       await announceWinner();
@@ -234,66 +296,97 @@ async function startAutoAnnounce() {
   }, 1000);
 }
 
+// ══════════════════════════════════════════════
+// ANNOUNCE WINNER — Balance + Analytics
+// ══════════════════════════════════════════════
 async function announceWinner() {
   const pendSnap = await db.ref('game/pendingWinner').get();
   const data = pendSnap.val();
   if (!data) return;
+
   const winners = data.winners;
   const prize = data.prize || 0;
   const share = Math.floor(prize / winners.length);
   let botWinShare = 0;
+
   for (let w of winners) {
-    if (w.isBot) { botWinShare += share; continue; }
-    const uRef = db.ref('users/'+w.user+'/balance');
+    if (w.isBot) {
+      botWinShare += share;
+      continue;
+    }
+    const uRef = db.ref('users/' + w.user + '/balance');
     const s = await uRef.get();
-    await uRef.set((s.val()||0) + share);
+    await uRef.set((s.val() || 0) + share);
+
     const profSnap = await db.ref('analytics/totalProfit').get();
-    await db.ref('analytics/totalProfit').set(Math.max(0,(profSnap.val()||0) - share));
+    await db.ref('analytics/totalProfit').set(Math.max(0, (profSnap.val() || 0) - share));
   }
+
   if (botWinShare > 0) {
     const profSnap = await db.ref('analytics/totalProfit').get();
-    await db.ref('analytics/totalProfit').set((profSnap.val()||0) + botWinShare);
+    await db.ref('analytics/totalProfit').set((profSnap.val() || 0) + botWinShare);
     const bpSnap = await db.ref('analytics/botWinProfit').get();
-    await db.ref('analytics/botWinProfit').set((bpSnap.val()||0) + botWinShare);
+    await db.ref('analytics/botWinProfit').set((bpSnap.val() || 0) + botWinShare);
   }
+
   const winnersObj = {};
-  winners.forEach((w,i) => { winnersObj[i] = {...w, prize: share}; });
+  winners.forEach((w, i) => { winnersObj[i] = { ...w, prize: share }; });
   await db.ref('game/winners').set(winnersObj);
-  await db.ref('game/announcement').set({ type:'winner', winners, prize, share, time: Date.now() });
+
+  await db.ref('game/announcement').set({
+    type: 'winner', winners, prize, share, time: Date.now()
+  });
+
   await db.ref('game/paid').set(true);
   await db.ref('game/pendingWinner/announced').set(true);
   await db.ref('game/status').set({ started: false, waitingRestart: true });
+
+  // Analytics
   const confSnap = await db.ref('game/confirmedNumbers').get();
-  const playerCount = new Set(Object.values(confSnap.val()||{})).size;
+  const playerCount = new Set(Object.values(confSnap.val() || {})).size;
+
   const totalSnap = await db.ref('game/total').get();
   const anCollSnap = await db.ref('analytics/totalCollected').get();
   const anPaidSnap = await db.ref('analytics/totalPaidOut').get();
-  await db.ref('analytics/totalCollected').set((anCollSnap.val()||0) + (totalSnap.val()||0));
-  await db.ref('analytics/totalPaidOut').set((anPaidSnap.val()||0) + prize);
+  await db.ref('analytics/totalCollected').set((anCollSnap.val() || 0) + (totalSnap.val() || 0));
+  await db.ref('analytics/totalPaidOut').set((anPaidSnap.val() || 0) + prize);
+
   const prevAvg = (await db.ref('analytics/avgPlayers').get()).val() || 0;
-  await db.ref('analytics/avgPlayers').set(((prevAvg*(roundNumber-1)) + playerCount) / roundNumber);
+  await db.ref('analytics/avgPlayers').set(
+    ((prevAvg * (roundNumber - 1)) + playerCount) / roundNumber
+  );
+
   const dailyProfitSnap = await db.ref('analytics/dailyProfit').get();
-  await db.ref('analytics/dailyProfit').set((dailyProfitSnap.val()||0) + botWinShare);
+  await db.ref('analytics/dailyProfit').set((dailyProfitSnap.val() || 0) + botWinShare);
   await db.ref('analytics/dailyRound').set(roundNumber);
-  console.log(`✅ Paid! Share: ${share} ብር`);
+
+  console.log(`✅ Paid! Share: ${share} ብር | Bot profit: ${botWinShare} ብር`);
 }
 
+// ══════════════════════════════════════════════
+// SCHEDULE NEXT ROUND — Daily reset + cleanup
+// ══════════════════════════════════════════════
 async function scheduleNextRound() {
   if (!autoModeOn) return;
+
+  // Daily reset
   const now = new Date();
   const todayStr = now.toISOString().split('T')[0];
   const lastResetSnap = await db.ref('analytics/lastResetDate').get();
   const lastReset = lastResetSnap.val();
-  if(lastReset !== todayStr) {
+
+  if (lastReset !== todayStr) {
     const prevRoundSnap = await db.ref('analytics/dailyRound').get();
     const prevProfitSnap = await db.ref('analytics/dailyProfit').get();
     const prevRound = prevRoundSnap.val() || 0;
     const prevProfit = prevProfitSnap.val() || 0;
-    if(prevRound > 0) {
-      await db.ref('analytics/history/'+lastReset).set({
+
+    if (prevRound > 0) {
+      await db.ref('analytics/history/' + lastReset).set({
         date: lastReset, rounds: prevRound, profit: prevProfit
       });
     }
+
     await db.ref('analytics/dailyRound').set(0);
     await db.ref('analytics/dailyProfit').set(0);
     await db.ref('analytics/lastResetDate').set(todayStr);
@@ -301,8 +394,11 @@ async function scheduleNextRound() {
     await db.ref('autoMode/round').set(1);
     console.log('🔄 Daily Reset:', todayStr);
   }
+
   roundNumber++;
-  console.log(`🔄 Round ${roundNumber}`);
+  console.log(`🔄 Round ${roundNumber} preparing...`);
+
+  // Firebase cleanup
   await db.ref('game/calledNumbers').remove();
   await db.ref('game/status').set({ started: false });
   await db.ref('game/pendingWinner').remove();
@@ -313,17 +409,23 @@ async function scheduleNextRound() {
   await db.ref('game/prize').set(0);
   await db.ref('game/total').set(0);
   calledNumbers = [];
+
+  // Bot users cleanup
   const usersSnap = await db.ref('users').get();
   const usersData = usersSnap.val() || {};
   for (let uid in usersData) {
     if (usersData[uid] && usersData[uid].is_bot) {
-      await db.ref('users/'+uid).remove();
+      await db.ref('users/' + uid).remove();
     }
   }
+
   await db.ref('autoMode/round').set(roundNumber);
   await db.ref('autoMode/phase').set('countdown');
+
+  console.log(`🔄 Round ${roundNumber} — starting countdown...`);
+
   setTimeout(async () => {
     if (!autoModeOn) return;
     await startAutoCountdown();
   }, 3000);
-}
+    }
