@@ -53,9 +53,7 @@ app.post('/confirm-card', async (req, res) => {
   } catch(e) {
     return res.json({ok:false, msg:'Error: '+e.message});
   }
-})
-
-const db = admin.database();
+});
 
 let autoModeOn = false;
 let autoCdMinutes = 3;
