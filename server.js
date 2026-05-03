@@ -3,10 +3,17 @@ const express = require('express');
 const app = express();
 const path = require('path');
 
+const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+  databaseURL: "https://house-rent-app-3674a-default-rtdb.firebaseio.com/"
+});
+const db = admin.database();
+
 app.use(express.static(__dirname));
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
-app.listen(process.env.PORT || 3000);
 app.use(express.json());
+app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
+app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
 
 app.post('/confirm-card', async (req, res) => {
   const { userId, cardId } = req.body;
@@ -46,12 +53,8 @@ app.post('/confirm-card', async (req, res) => {
   } catch(e) {
     return res.json({ok:false, msg:'Error: '+e.message});
   }
-});
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  databaseURL: "https://house-rent-app-3674a-default-rtdb.firebaseio.com/"
-});
+})
+
 const db = admin.database();
 
 let autoModeOn = false;
