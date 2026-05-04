@@ -320,18 +320,10 @@ select{background:#0a0f1c;border:1px solid var(--border);color:var(--text);paddi
 <div class="section">
   <div class="sec-title">💳 Payments &amp; Withdrawals</div>
   <div class="tab-row">
-    <button class="tab-btn active" id="tabBtnDeposit" onclick="switchTab('deposit')">
-      💳 Deposits <span class="count-badge" id="depositCount" style="display:none">0</span>
-    </button>
+    
     <button class="tab-btn" id="tabBtnWithdraw" onclick="switchTab('withdraw')">
       🏧 Withdrawals <span class="count-badge" id="withdrawCount" style="display:none">0</span>
     </button>
-  </div>
-  <div class="tab-pane active" id="tabDeposit">
-    <div id="depositsList"><div class="empty">No pending deposits</div></div>
-  </div>
-  <div class="tab-pane" id="tabWithdraw">
-    <div id="withdrawalsList"><div class="empty">No pending withdrawals</div></div>
   </div>
 </div>
 
@@ -665,7 +657,7 @@ onValue(ref(db,'analytics/history'), s => {
 onValue(ref(db,'analytics/botWinProfit'), s => { document.getElementById('anBotProfit').textContent = s.val()||0; });
 
 // ══ LISTEN: Payments ══
-onValue(ref(db,'payments'), s => { renderDeposits(s.val()||{}); });
+
 onValue(ref(db,'bot/withdrawals'), s => { renderWithdrawals(s.val()||{}); });
 
 // ══ RENDER: Balls ══
@@ -740,43 +732,7 @@ function renderWinnerList(winners){
   });
 }
 
-// ══ RENDER: Deposits ══
-function renderDeposits(data){
-  const box = document.getElementById('depositsList');
-  const badge = document.getElementById('depositCount');
-  const pending = Object.entries(data).filter(([,v])=>v.status==='pending');
-  badge.textContent = pending.length;
-  badge.style.display = pending.length ? 'inline' : 'none';
-  if(!pending.length){ box.innerHTML = '<div class="empty">📭 Pending deposit የለም</div>'; return; }
-  pending.sort((a,b)=>(b[1].time||0)-(a[1].time||0));
-  box.innerHTML = '';
-  pending.forEach(([key,pay]) => {
-    const display = pay.display||pay.full_name||pay.username||pay.user_id;
-    const uid = pay.user_id||'';
-    const amount = pay.amount||0;
-    const timeStr = fmtTime(pay.time);
-    const card = document.createElement('div');
-    card.className = 'pay-card';
-    card.innerHTML = `
-      <div class="pay-card-header">
-        ${pay.image
-          ? `<img class="pay-thumb" src="${pay.image}" onclick="showImg('${pay.image}')">`
-          : `<div style="width:52px;height:52px;background:#0a1830;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:1.4rem;border:2px solid var(--border)">📸</div>`
-        }
-        <div class="pay-info">
-          <div class="pay-name">👤 ${display}</div>
-          <div class="pay-uid">ID: <code style="color:var(--cyan);font-size:0.8rem">${uid}</code></div>
-          <div class="pay-time">🕐 ${timeStr}</div>
-        </div>
-        <div style="text-align:right"><div class="pay-amount">${amount} ብር</div></div>
-      </div>
-      <div class="pay-actions">
-        <button class="pay-approve" onclick="approveDeposit('${key}','${uid}',${amount})">✅ Approve</button>
-        <button class="pay-reject" onclick="rejectDeposit('${key}','${uid}')">❌ Reject</button>
-      </div>`;
-    box.appendChild(card);
-  });
-}
+
 
 // ══ RENDER: Withdrawals ══
 function renderWithdrawals(data){
@@ -823,29 +779,13 @@ function renderWithdrawals(data){
   });
 }
 
-// ══ ACTIONS: Deposit ══
-window.approveDeposit = async (key, uid, amount) => {
-  if(!confirm(`✅ ${amount} ብር Approve?`)) return;
-  const uRef = ref(db,'users/'+uid+'/balance');
-  const s = await get(uRef);
-  await set(uRef, (s.val()||0) + amount);
-  await set(ref(db,'payments/'+key+'/status'), 'approved');
-  const depSnap = await get(ref(db,'analytics/totalDeposits'));
-  await set(ref(db,'analytics/totalDeposits'), (depSnap.val()||0) + amount);
-  alert('✅ Approved!');
-};
-
-window.rejectDeposit = async (key, uid) => {
-  if(!confirm('❌ Reject?')) return;
-  await set(ref(db,'payments/'+key+'/status'), 'rejected');
-  alert('❌ Rejected.');
-};
 
 // ══ ACTIONS: Withdrawal ══
 window.approveWithdrawal = async (key, uid, amount) => {
   if(!confirm(`✅ ${amount} ብር ተላከ?`)) return;
   await set(ref(db,'bot/withdrawals/'+key+'/status'), 'approved');
   await set(ref(db,'users/'+uid+'/pending_withdrawal'), 0);
+  await set(ref(db,'bot/state/'+uid), null);
   const wdSnap = await get(ref(db,'analytics/totalWithdrawals'));
   await set(ref(db,'analytics/totalWithdrawals'), (wdSnap.val()||0) + amount);
   const profSnap = await get(ref(db,'analytics/totalProfit'));
@@ -1013,4 +953,4 @@ document.getElementById('botCountInput').oninput = function(){
 
 </script>
 </body>
-      </html>
+</html>
