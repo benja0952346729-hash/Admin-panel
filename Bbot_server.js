@@ -205,26 +205,8 @@ async function botEngineTick() {
     const statusData = statusSnap.val() || {};
     const cdData = cdSnap.val() || {};
 
-    // ── If game just started but not full → force fill instantly ──
+    // ── Game ሲጀምር bot አይገባም ──
     if (statusData.started) {
-      const usersSnapCheck = await get(ref(db, 'users'));
-      const usersDataCheck = usersSnapCheck.val() || {};
-      const botIdsCheck = new Set(Object.keys(usersDataCheck).filter(uid => usersDataCheck[uid]?.is_bot === true));
-      const totalCheck = Object.keys(confData).length;
-      const neededCheck = Math.max(0, 100 - totalCheck);
-      if (neededCheck > 0) {
-        log(`⚡ Game started but only ${totalCheck}/100 — force filling ${neededCheck} bots!`);
-        const bet = betSnap.val() || 0;
-        const pct = (pctSnap.val() || 80) / 100;
-        for (let i = 0; i < neededCheck; i++) {
-          const freshSnap = await get(ref(db, 'game/confirmedNumbers'));
-          const freshData = freshSnap.val() || {};
-          const freshUsers = await get(ref(db, 'users'));
-          await addOneBot(freshData, freshUsers.val() || {}, bet, pct, neededCheck - i);
-          await new Promise(r => setTimeout(r, 300 + Math.random() * 400));
-        }
-        log('✅ Force fill complete — 100/100');
-      }
       await set(ref(db, 'smartBot/status'), 'GAME_LIVE');
       return;
     }
