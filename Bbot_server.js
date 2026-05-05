@@ -355,18 +355,6 @@ async function addOneBot(confData, usersData, bet, pct, botsNeeded) {
   log(`✅ Bot added: ${botName} → Card #${cardId} | ${botsNeeded - 1} remaining`);
 }
 
-// ══ KEEP ALIVE (Railway) ══
-const http = require('http');
-http.createServer((req, res) => {
-  res.writeHead(200);
-  res.end(JSON.stringify({
-    status: 'Smart Bot Server Running',
-    smartBotEnabled,
-    botEngineRunning,
-    lastBotAddedTime: new Date(lastBotAddedTime).toLocaleTimeString()
-  }));
-}).listen(process.env.PORT || 3000, () => {
-  log('🚀 Smart Bot Server started on port ' + (process.env.PORT || 3000));
-  log('Listening for smartBot/enabled changes...');
-});
-
+// ══ KEEP ALIVE — no HTTP server (port conflict fix) ══
+log('🚀 Smart Bot Server running — no HTTP port needed');
+log('Listening for smartBot/enabled changes...');
