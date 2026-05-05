@@ -1,12 +1,25 @@
-const { initializeApp } = require('firebase/app');
-const { getDatabase, ref, set, get, onValue, update } = require('firebase/database');
+const admin = require('firebase-admin');
 
-// ══ FIREBASE CONFIG ══
-const app = initializeApp({
-  apiKey: "AIzaSyCHXEQ8nx1SYeQm1eptTf2xU_WXKG4lowM",
-  databaseURL: "https://house-rent-app-3674a-default-rtdb.firebaseio.com/"
-});
-const db = getDatabase(app);
+// ══ FIREBASE ADMIN CONFIG ══
+if(!admin.apps.length){
+  admin.initializeApp({
+    credential: admin.credential.applicationDefault(),
+    databaseURL: "https://house-rent-app-3674a-default-rtdb.firebaseio.com/"
+  });
+}
+const db = admin.database();
+
+// Helper wrappers to match firebase client API style
+function ref(db, path){ return db.ref(path); }
+async function set(refObj, val){ return refObj.set(val); }
+async function get(refObj){ 
+  const snap = await refObj.once('value');
+  return { val: () => snap.val() };
+}
+async function update(refObj, val){ return refObj.update(val); }
+function onValue(refObj, cb){
+  refObj.on('value', snap => cb({ val: () => snap.val() }));
+}
 
 // ══ NAME SYSTEM (300 TOTAL) ══
 
@@ -191,9 +204,26 @@ async function botEngineTick() {
     const statusData = statusSnap.val() || {};
     const cdData = cdSnap.val() || {};
 
-    // ── Don't add bots if game is live ──
+    // ── If game just started but not full → force fill instantly ──
     if (statusData.started) {
-      // update Firebase status for admin UI
+      const usersSnapCheck = await get(ref(db, 'users'));
+      const usersDataCheck = usersSnapCheck.val() || {};
+      const botIdsCheck = new Set(Object.keys(usersDataCheck).filter(uid => usersDataCheck[uid]?.is_bot === true));
+      const totalCheck = Object.keys(confData).length;
+      const neededCheck = Math.max(0, 100 - totalCheck);
+      if (neededCheck > 0) {
+        log(`⚡ Game started but only ${totalCheck}/100 — force filling ${neededCheck} bots!`);
+        const bet = betSnap.val() || 0;
+        const pct = (pctSnap.val() || 80) / 100;
+        for (let i = 0; i < neededCheck; i++) {
+          const freshSnap = await get(ref(db, 'game/confirmedNumbers'));
+          const freshData = freshSnap.val() || {};
+          const freshUsers = await get(ref(db, 'users'));
+          await addOneBot(freshData, freshUsers.val() || {}, bet, pct, neededCheck - i);
+          await new Promise(r => setTimeout(r, 300 + Math.random() * 400));
+        }
+        log('✅ Force fill complete — 100/100');
+      }
       await set(ref(db, 'smartBot/status'), 'GAME_LIVE');
       return;
     }
@@ -273,20 +303,32 @@ async function botEngineTick() {
       return;
     }
 
+    // ── FORCE FILL: ቀሪ 30 ሰከንድ ሲቀር ሁሉም ቀሪ bots ፈጠን ይሞሉ ──
+    if (remainSecs <= 30 && botsNeeded > 0) {
+      log(`⚡ ${Math.round(remainSecs)}s remaining — force filling ${botsNeeded} bots!`);
+      for (let i = 0; i < botsNeeded; i++) {
+        const freshSnap = await get(ref(db, 'game/confirmedNumbers'));
+        const freshData = freshSnap.val() || {};
+        const freshUsers = await get(ref(db, 'users'));
+        await addOneBot(freshData, freshUsers.val() || {}, bet, pct, botsNeeded - i);
+        await new Promise(r => setTimeout(r, 200 + Math.random() * 300));
+      }
+      log('✅ Force fill complete — 100/100');
+      return;
+    }
+
     // ── Calculate natural bot entry gap ──
     // Spread remaining bots over remaining time naturally
     const baseGap = remainSecs > 5 ? (remainMs / Math.max(1, projectedBotsNeeded)) : 1500;
 
-    // Adjust gap based on real player speed:
-    // More real players → bigger gap (bots slow down)
-    // Fewer real players → smaller gap (bots speed up)
-    const speedFactor = 1 + (realRatePerMin / 10); // 0 real/min = 1x, 10 real/min = 2x gap
+    // More real players → bigger gap, fewer → smaller gap
+    const speedFactor = 1 + (realRatePerMin / 10);
     let adjustedGap = baseGap * speedFactor;
 
-    // Clamp: min 1.5s, max 15s
-    adjustedGap = Math.max(1500, Math.min(15000, adjustedGap));
+    // Clamp: min 1.5s, max 12s
+    adjustedGap = Math.max(1500, Math.min(12000, adjustedGap));
 
-    // Add human-like random variation ±25%
+    // Human-like random variation ±25%
     const variation = adjustedGap * 0.25;
     const actualGap = adjustedGap + (Math.random() * variation * 2 - variation);
 
@@ -309,7 +351,7 @@ async function botEngineTick() {
   }
 }
 
-// ══ ADD ONE BOT ══
+// ══ ADD ONE BOT (with multi-card support) ══
 async function addOneBot(confData, usersData, bet, pct, botsNeeded) {
   // Available card slots
   const taken = new Set(Object.keys(confData).map(Number));
@@ -319,20 +361,30 @@ async function addOneBot(confData, usersData, bet, pct, botsNeeded) {
   }
   if (!avail.length) return;
 
-  // Pick random card
-  const cardId = avail[Math.floor(Math.random() * avail.length)];
+  // 10% chance → multi card (2-3 cards), 90% → 1 card
+  // Only take multi if enough cards available and enough bots needed
+  let cardCount = 1;
+  if (botsNeeded >= 3 && avail.length >= 3 && Math.random() < 0.10) {
+    cardCount = Math.random() < 0.6 ? 2 : 3; // 60% chance 2 cards, 40% chance 3 cards
+  }
 
-  // Pick unused name
+  // Pick unused name & ID — one bot, multiple cards
   const botName = getRandomName();
-
-  // Fake Telegram-like ID
   const fakeBotId = String(7000000000 + Math.floor(Math.random() * 999999999));
 
-  // Write to Firebase
-  await set(ref(db, `game/confirmedNumbers/${cardId}`), fakeBotId);
+  // Shuffle avail and pick cardCount slots
+  const shuffled = avail.sort(() => Math.random() - 0.5);
+  const selectedCards = shuffled.slice(0, cardCount);
+
+  // Write user once
   await set(ref(db, `users/${fakeBotId}/display`), botName);
   await set(ref(db, `users/${fakeBotId}/is_bot`), true);
   await set(ref(db, `users/${fakeBotId}/balance`), 0);
+
+  // Write each card
+  for (const cardId of selectedCards) {
+    await set(ref(db, `game/confirmedNumbers/${cardId}`), fakeBotId);
+  }
 
   // Update prize pool
   const newSnap = await get(ref(db, 'game/confirmedNumbers'));
@@ -347,9 +399,10 @@ async function addOneBot(confData, usersData, bet, pct, botsNeeded) {
   // Log to Firebase for admin UI
   await set(ref(db, 'smartBot/lastAdded'), {
     name: botName,
-    cardId,
+    cardId: selectedCards.join(','),
+    cards: cardCount,
     time: Date.now(),
-    remaining: botsNeeded - 1
+    remaining: botsNeeded - cardCount
   });
 
   log(`✅ Bot added: ${botName} → Card #${cardId} | ${botsNeeded - 1} remaining`);
