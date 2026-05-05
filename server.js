@@ -17,6 +17,7 @@ app.use(express.json());
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
 
+// ══ CONFIRM CARD — Transaction fix (race condition) ══
 app.post('/confirm-card', async (req, res) => {
   const { userId, cardId } = req.body;
   if (!userId || !cardId) return res.json({ ok: false, msg: 'Missing data' });
@@ -36,12 +37,20 @@ app.post('/confirm-card', async (req, res) => {
     const confSnap = await db.ref('game/confirmedNumbers').get();
     const data = confSnap.val() || {};
 
-    if (data[String(cardId)]) return res.json({ ok: false, msg: '❌ Card ተይዟል!' });
-
     const myCards = Object.values(data).filter(v => String(v) === String(userId));
     if (myCards.length >= 5) return res.json({ ok: false, msg: '❌ Max 5 cards!' });
 
-    await db.ref('game/confirmedNumbers/' + cardId).set(userId);
+    // ✅ Transaction — double confirm ይከላከላል
+    const cardRef = db.ref('game/confirmedNumbers/' + cardId);
+    const result = await cardRef.transaction(current => {
+      if (current !== null && current !== undefined) return; // taken — abort
+      return userId;
+    });
+
+    if (!result.committed) {
+      return res.json({ ok: false, msg: '❌ Card ተይዟል!' });
+    }
+
     await db.ref('users/' + userId + '/balance').set(bal - bet);
 
     const newConf = await db.ref('game/confirmedNumbers').get();
@@ -57,6 +66,7 @@ app.post('/confirm-card', async (req, res) => {
   }
 });
 
+// ══ STATE ══
 let autoModeOn = false;
 let autoCdMinutes = 3;
 let calledNumbers = [];
@@ -67,6 +77,7 @@ let roundNumber = 1;
 
 console.log('🚀 Bingo Server Started!');
 
+// ══ HELPERS ══
 function getLetter(n) {
   if (n <= 15) return 'B';
   if (n <= 30) return 'I';
@@ -100,9 +111,9 @@ function checkWin(board, called) {
   for (let r = 0; r < 5; r++)
     if (g[r].every(n => n === 'FREE' || called.includes(n))) return true;
   for (let c = 0; c < 5; c++)
-    if ([0, 1, 2, 3, 4].every(r => g[r][c] === 'FREE' || called.includes(g[r][c]))) return true;
-  if ([0, 1, 2, 3, 4].every(i => g[i][i] === 'FREE' || called.includes(g[i][i]))) return true;
-  if ([0, 1, 2, 3, 4].every(i => g[i][4 - i] === 'FREE' || called.includes(g[i][4 - i]))) return true;
+    if ([0,1,2,3,4].every(r => g[r][c] === 'FREE' || called.includes(g[r][c]))) return true;
+  if ([0,1,2,3,4].every(i => g[i][i] === 'FREE' || called.includes(g[i][i]))) return true;
+  if ([0,1,2,3,4].every(i => g[i][4-i] === 'FREE' || called.includes(g[i][4-i]))) return true;
   return false;
 }
 
@@ -112,7 +123,7 @@ function clearAllTimers() {
   clearInterval(announceTimer); announceTimer = null;
 }
 
-// AUTO MODE LISTENER
+// ══ AUTO MODE LISTENER ══
 db.ref('autoMode/on').on('value', async snap => {
   const val = snap.val();
   if (val === true && !autoModeOn) {
@@ -131,6 +142,7 @@ db.ref('autoMode/on').on('value', async snap => {
   }
 });
 
+// ══ COUNTDOWN ══
 async function startAutoCountdown() {
   if (!autoModeOn) return;
   clearAllTimers();
@@ -147,80 +159,137 @@ async function startAutoCountdown() {
   }, 1000);
 }
 
+// ══ START GAME — Error handling + auto recover ══
 async function startAutoGame() {
   if (!autoModeOn) return;
-  calledNumbers = [];
-  await db.ref('game/countdown').set({ active: false });
-  await db.ref('game/status').set({ started: true, autoStarted: true });
-  await db.ref('game/calledNumbers').remove();
-  await db.ref('game/winners').remove();
-  await db.ref('game/pendingWinner').remove();
-  await db.ref('game/announcement').remove();
-  await db.ref('game/paid').set(false);
-  await db.ref('autoMode/phase').set('playing');
-  console.log('🎮 Game Started!');
-  const speedSnap = await db.ref('autoMode/callSpeed').get();
-  const callSpeed = speedSnap.val() || 6000;
-  autoCallNumber(callSpeed);
+  try {
+    calledNumbers = [];
+    await db.ref('game/countdown').set({ active: false });
+    await db.ref('game/status').set({ started: true, autoStarted: true });
+    await db.ref('game/calledNumbers').remove();
+    await db.ref('game/winners').remove();
+    await db.ref('game/pendingWinner').remove();
+    await db.ref('game/announcement').remove();
+    await db.ref('game/paid').set(false);
+    await db.ref('autoMode/phase').set('playing');
+    console.log('🎮 Game Started!');
+    const speedSnap = await db.ref('autoMode/callSpeed').get();
+    const callSpeed = speedSnap.val() || 6000;
+    autoCallNumber(callSpeed);
+  } catch (e) {
+    console.error('❌ startAutoGame error:', e.message);
+    await db.ref('autoMode/phase').set('error');
+    // Auto recover — 10 ሰኮንድ ቆይቶ እንደገና ይሞክራል
+    setTimeout(() => {
+      if (autoModeOn) startAutoCountdown();
+    }, 10000);
+  }
 }
-
+// ══ CALL NUMBER ══
 function autoCallNumber(speed) {
   if (!autoModeOn) return;
   clearInterval(callTimer);
   callTimer = setInterval(async () => {
-    if (!autoModeOn) { clearInterval(callTimer); return; }
-    const pendSnap = await db.ref('game/pendingWinner').get();
-    if (pendSnap.val() && !pendSnap.val().announced) {
-      clearInterval(callTimer);
-      startAutoAnnounce();
-      return;
+    try {
+      if (!autoModeOn) { clearInterval(callTimer); return; }
+
+      const pendSnap = await db.ref('game/pendingWinner').get();
+      if (pendSnap.val() && !pendSnap.val().announced) {
+        clearInterval(callTimer);
+        startAutoAnnounce();
+        return;
+      }
+
+      const used = new Set(calledNumbers);
+      const remaining = [...Array(75)].map((_, i) => i + 1).filter(n => !used.has(n));
+
+      // ✅ 75 numbers ሙሉ ቢጠራ — refund ያድርግ
+      if (!remaining.length) {
+        clearInterval(callTimer);
+        console.log('⚠️ All 75 called — no winner. Refunding...');
+        const confSnap = await db.ref('game/confirmedNumbers').get();
+        const data = confSnap.val() || {};
+        const betSnap = await db.ref('game/bet').get();
+        const bet = betSnap.val() || 0;
+
+        for (let cardId in data) {
+          const uid = data[cardId];
+          const isBotSnap = await db.ref('users/' + uid + '/is_bot').get();
+          if (isBotSnap.val() === true) continue; // bot አይመለስም
+          const uRef = db.ref('users/' + uid + '/balance');
+          const s = await uRef.get();
+          await uRef.set((s.val() || 0) + bet);
+          // User ማሳወቅ
+          await db.ref('notifications/' + uid).set({
+            message: `⚠️ Game ሳይጠናቀቅ ተዘጋ — ${bet} ብር ተመለሰ!`,
+            time: Date.now(),
+            read: false
+          });
+        }
+
+        await db.ref('game/announcement').set({
+          type: 'no_winner',
+          message: 'ምንም አሸናፊ አልተገኘም — ብር ተመለሰ',
+          time: Date.now()
+        });
+
+        await scheduleNextRound();
+        return;
+      }
+
+      const n = remaining[Math.floor(Math.random() * remaining.length)];
+      calledNumbers.push(n);
+      await db.ref('game/calledNumbers').push(n);
+      console.log(`📢 ${getLetter(n)}${n}`);
+
+      const totalSnap = await db.ref('game/total').get();
+      const pctSnap = await db.ref('game/percent').get();
+      const prize = Math.floor((totalSnap.val() || 0) * ((pctSnap.val() || 80) / 100));
+      await db.ref('game/prize').set(prize);
+
+      await checkWinners();
+    } catch (e) {
+      console.error('❌ callNumber error:', e.message);
     }
-    const used = new Set(calledNumbers);
-    const remaining = [...Array(75)].map((_, i) => i + 1).filter(n => !used.has(n));
-    if (!remaining.length) {
-      clearInterval(callTimer);
-      await scheduleNextRound();
-      return;
-    }
-    const n = remaining[Math.floor(Math.random() * remaining.length)];
-    calledNumbers.push(n);
-    await db.ref('game/calledNumbers').push(n);
-    console.log(`📢 ${getLetter(n)}${n}`);
-    const totalSnap = await db.ref('game/total').get();
-    const pctSnap = await db.ref('game/percent').get();
-    const prize = Math.floor((totalSnap.val() || 0) * ((pctSnap.val() || 80) / 100));
-    await db.ref('game/prize').set(prize);
-    await checkWinners();
   }, speed);
 }
 
+// ══ CHECK WINNERS ══
 async function checkWinners() {
-  const paidSnap = await db.ref('game/paid').get();
-  if (paidSnap.val()) return;
-  const confSnap = await db.ref('game/confirmedNumbers').get();
-  const allCards = confSnap.val() || {};
-  const winners = [];
-  for (let id in allCards) {
-    const board = generateBoard(Number(id));
-    if (checkWin(board, calledNumbers)) {
-      const uid = allCards[id];
-      const isBotSnap = await db.ref('users/' + uid + '/is_bot').get();
-      const isBot = isBotSnap.val() === true;
-      const displaySnap = await db.ref('users/' + uid + '/display').get();
-      const name = displaySnap.val() || String(uid);
-      winners.push({ user: uid, displayName: name, cardId: id, isBot, time: Date.now() });
+  try {
+    const paidSnap = await db.ref('game/paid').get();
+    if (paidSnap.val()) return;
+
+    const confSnap = await db.ref('game/confirmedNumbers').get();
+    const allCards = confSnap.val() || {};
+    const winners = [];
+
+    for (let id in allCards) {
+      const board = generateBoard(Number(id));
+      if (checkWin(board, calledNumbers)) {
+        const uid = allCards[id];
+        const isBotSnap = await db.ref('users/' + uid + '/is_bot').get();
+        const isBot = isBotSnap.val() === true;
+        const displaySnap = await db.ref('users/' + uid + '/display').get();
+        const name = displaySnap.val() || String(uid);
+        winners.push({ user: uid, displayName: name, cardId: id, isBot, time: Date.now() });
+      }
     }
-  }
-  if (winners.length > 0) {
-    clearInterval(callTimer);
-    const prizeSnap = await db.ref('game/prize').get();
-    const prize = prizeSnap.val() || 0;
-    await db.ref('game/pendingWinner').set({ winners, prize, announced: false, time: Date.now() });
-    console.log(`🏆 Winner found!`);
-    startAutoAnnounce();
+
+    if (winners.length > 0) {
+      clearInterval(callTimer);
+      const prizeSnap = await db.ref('game/prize').get();
+      const prize = prizeSnap.val() || 0;
+      await db.ref('game/pendingWinner').set({ winners, prize, announced: false, time: Date.now() });
+      console.log(`🏆 Winner found! ${winners.length} winner(s)`);
+      startAutoAnnounce();
+    }
+  } catch (e) {
+    console.error('❌ checkWinners error:', e.message);
   }
 }
 
+// ══ ANNOUNCE ══
 async function startAutoAnnounce() {
   if (!autoModeOn) return;
   clearAllTimers();
@@ -236,96 +305,181 @@ async function startAutoAnnounce() {
   }, 1000);
 }
 
+// ══ ANNOUNCE WINNER — Notification + allWinners history ══
 async function announceWinner() {
-  const pendSnap = await db.ref('game/pendingWinner').get();
-  const data = pendSnap.val();
-  if (!data) return;
-  const winners = data.winners;
-  const prize = data.prize || 0;
-  const share = Math.floor(prize / winners.length);
-  let botWinShare = 0;
-  for (let w of winners) {
-    if (w.isBot) { botWinShare += share; continue; }
-    const uRef = db.ref('users/' + w.user + '/balance');
-    const s = await uRef.get();
-    await uRef.set((s.val() || 0) + share);
-    const profSnap = await db.ref('analytics/totalProfit').get();
-    await db.ref('analytics/totalProfit').set(Math.max(0, (profSnap.val() || 0) - share));
-  }
-  if (botWinShare > 0) {
-    const profSnap = await db.ref('analytics/totalProfit').get();
-    await db.ref('analytics/totalProfit').set((profSnap.val() || 0) + botWinShare);
-    const bpSnap = await db.ref('analytics/botWinProfit').get();
-    await db.ref('analytics/botWinProfit').set((bpSnap.val() || 0) + botWinShare);
-  }
-  const winnersObj = {};
-  winners.forEach((w, i) => { winnersObj[i] = { ...w, prize: share }; });
-  await db.ref('game/winners').set(winnersObj);
-  await db.ref('game/announcement').set({ type: 'winner', winners, prize, share, time: Date.now() });
-  await db.ref('game/paid').set(true);
-  await db.ref('game/pendingWinner/announced').set(true);
-  await db.ref('game/status').set({ started: false, waitingRestart: true });
-  const confSnap = await db.ref('game/confirmedNumbers').get();
-  const playerCount = new Set(Object.values(confSnap.val() || {})).size;
-  const totalSnap = await db.ref('game/total').get();
-  const anCollSnap = await db.ref('analytics/totalCollected').get();
-  const anPaidSnap = await db.ref('analytics/totalPaidOut').get();
-  await db.ref('analytics/totalCollected').set((anCollSnap.val() || 0) + (totalSnap.val() || 0));
-  await db.ref('analytics/totalPaidOut').set((anPaidSnap.val() || 0) + prize);
-  const prevAvg = (await db.ref('analytics/avgPlayers').get()).val() || 0;
-  await db.ref('analytics/avgPlayers').set(((prevAvg * (roundNumber - 1)) + playerCount) / roundNumber);
-  const dailyProfitSnap = await db.ref('analytics/dailyProfit').get();
-  await db.ref('analytics/dailyProfit').set((dailyProfitSnap.val() || 0) + botWinShare);
-  await db.ref('analytics/dailyRound').set(roundNumber);
-  console.log(`✅ Paid! Share: ${share} ብር`);
-}
+  try {
+    const pendSnap = await db.ref('game/pendingWinner').get();
+    const data = pendSnap.val();
+    if (!data) return;
 
-async function scheduleNextRound() {
-  if (!autoModeOn) return;
-  const now = new Date();
-  const todayStr = now.toISOString().split('T')[0];
-  const lastResetSnap = await db.ref('analytics/lastResetDate').get();
-  const lastReset = lastResetSnap.val();
-  if (lastReset !== todayStr) {
-    const prevRoundSnap = await db.ref('analytics/dailyRound').get();
-    const prevProfitSnap = await db.ref('analytics/dailyProfit').get();
-    const prevRound = prevRoundSnap.val() || 0;
-    const prevProfit = prevProfitSnap.val() || 0;
-    if (prevRound > 0) {
-      await db.ref('analytics/history/' + lastReset).set({
-        date: lastReset, rounds: prevRound, profit: prevProfit
+    const winners = data.winners;
+    const prize = data.prize || 0;
+    const share = Math.floor(prize / winners.length);
+    let botWinShare = 0;
+
+    for (let w of winners) {
+      if (w.isBot) {
+        botWinShare += share;
+        continue;
+      }
+      // ✅ Balance ጨምር
+      const uRef = db.ref('users/' + w.user + '/balance');
+      const s = await uRef.get();
+      await uRef.set((s.val() || 0) + share);
+
+      // ✅ Notification — winner ማሳወቅ
+      await db.ref('notifications/' + w.user).set({
+        message: `🎉 አሸነፍክ! ${share} ብር balance ላይ ታከለ! Card #${w.cardId}`,
+        time: Date.now(),
+        read: false
+      });
+
+      const profSnap = await db.ref('analytics/totalProfit').get();
+      await db.ref('analytics/totalProfit').set(Math.max(0, (profSnap.val() || 0) - share));
+    }
+
+    if (botWinShare > 0) {
+      const profSnap = await db.ref('analytics/totalProfit').get();
+      await db.ref('analytics/totalProfit').set((profSnap.val() || 0) + botWinShare);
+      const bpSnap = await db.ref('analytics/botWinProfit').get();
+      await db.ref('analytics/botWinProfit').set((bpSnap.val() || 0) + botWinShare);
+    }
+
+    // ✅ game/winners — frontend temporary display
+    const winnersObj = {};
+    winners.forEach((w, i) => { winnersObj[i] = { ...w, prize: share }; });
+    await db.ref('game/winners').set(winnersObj);
+
+    // ✅ allWinners — permanent history (ፈጽሞ አይጠፋም)
+    for (const w of winners) {
+      await db.ref('allWinners').push({
+        user: w.user,
+        displayName: w.displayName,
+        cardId: w.cardId,
+        prize: share,
+        isBot: w.isBot || false,
+        time: Date.now()
       });
     }
-    await db.ref('analytics/dailyRound').set(0);
-    await db.ref('analytics/dailyProfit').set(0);
-    await db.ref('analytics/lastResetDate').set(todayStr);
-    roundNumber = 1;
-    await db.ref('autoMode/round').set(1);
-    console.log('🔄 Daily Reset:', todayStr);
+
+    await db.ref('game/announcement').set({ type: 'winner', winners, prize, share, time: Date.now() });
+    await db.ref('game/paid').set(true);
+    await db.ref('game/pendingWinner/announced').set(true);
+    await db.ref('game/status').set({ started: false, waitingRestart: true });
+
+    // Analytics
+    const confSnap = await db.ref('game/confirmedNumbers').get();
+    const playerCount = new Set(Object.values(confSnap.val() || {})).size;
+    const totalSnap = await db.ref('game/total').get();
+    const anCollSnap = await db.ref('analytics/totalCollected').get();
+    const anPaidSnap = await db.ref('analytics/totalPaidOut').get();
+    await db.ref('analytics/totalCollected').set((anCollSnap.val() || 0) + (totalSnap.val() || 0));
+    await db.ref('analytics/totalPaidOut').set((anPaidSnap.val() || 0) + prize);
+    const prevAvg = (await db.ref('analytics/avgPlayers').get()).val() || 0;
+    await db.ref('analytics/avgPlayers').set(((prevAvg * (roundNumber - 1)) + playerCount) / roundNumber);
+    const dailyProfitSnap = await db.ref('analytics/dailyProfit').get();
+    await db.ref('analytics/dailyProfit').set((dailyProfitSnap.val() || 0) + botWinShare);
+    await db.ref('analytics/dailyRound').set(roundNumber);
+
+    console.log(`✅ Paid! Share: ${share} ብር each`);
+  } catch (e) {
+    console.error('❌ announceWinner error:', e.message);
   }
-  roundNumber++;
-  console.log(`🔄 Round ${roundNumber}`);
-  await db.ref('game/calledNumbers').remove();
-  await db.ref('game/status').set({ started: false });
-  await db.ref('game/pendingWinner').remove();
-  await db.ref('game/winners').remove();
-  await db.ref('game/announcement').remove();
-  await db.ref('game/paid').set(false);
-  await db.ref('game/confirmedNumbers').remove();
-  await db.ref('game/prize').set(0);
-  await db.ref('game/total').set(0);
-  calledNumbers = [];
-  const usersSnap = await db.ref('users').get();
-  const usersData = usersSnap.val() || {};
-  for (let uid in usersData) {
-    if (usersData[uid] && usersData[uid].is_bot) {
-      await db.ref('users/' + uid).remove();
+}
+
+// ══ NEXT ROUND — Daily reset + round increment ══
+async function scheduleNextRound() {
+  if (!autoModeOn) return;
+  try {
+    const now = new Date();
+    const todayStr = now.toISOString().split('T')[0];
+    const lastResetSnap = await db.ref('analytics/lastResetDate').get();
+    const lastReset = lastResetSnap.val();
+
+    // ✅ Daily reset
+    if (lastReset !== todayStr) {
+      const prevRoundSnap = await db.ref('analytics/dailyRound').get();
+      const prevProfitSnap = await db.ref('analytics/dailyProfit').get();
+      const prevRound = prevRoundSnap.val() || 0;
+      const prevProfit = prevProfitSnap.val() || 0;
+
+      if (prevRound > 0 && lastReset) {
+        await db.ref('analytics/history/' + lastReset).set({
+          date: lastReset, rounds: prevRound, profit: prevProfit
+        });
+        console.log(`📅 Daily saved: ${lastReset} — ${prevRound} rounds, ${prevProfit} ብር`);
+      }
+
+      await db.ref('analytics/dailyRound').set(0);
+      await db.ref('analytics/dailyProfit').set(0);
+      await db.ref('analytics/lastResetDate').set(todayStr);
+      roundNumber = 1;
+      await db.ref('autoMode/round').set(roundNumber);
+      console.log('🔄 Daily Reset:', todayStr);
+
+      // ✅ 5 ቀን የሞላቸው analytics/history ይጥፋ
+      const fiveDaysAgo = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000)
+        .toISOString().split('T')[0];
+      const histSnap = await db.ref('analytics/history').get();
+      const histData = histSnap.val() || {};
+      for (let date in histData) {
+        if (date < fiveDaysAgo) {
+          await db.ref('analytics/history/' + date).remove();
+          console.log('🗑 Deleted old history:', date);
+        }
+      }
+
+      // ✅ 5 ቀን የሞላቸው allWinners ይጥፋ
+      const fiveDaysAgoMs = Date.now() - 5 * 24 * 60 * 60 * 1000;
+      const awSnap = await db.ref('allWinners').get();
+      const awData = awSnap.val() || {};
+      for (let key in awData) {
+        if ((awData[key].time || 0) < fiveDaysAgoMs) {
+          await db.ref('allWinners/' + key).remove();
+          console.log('🗑 Deleted old winner:', key);
+        }
+      }
     }
+
+    // ✅ Round increment — db ቀድሞ set ከዚያ increment
+    await db.ref('autoMode/round').set(roundNumber);
+    roundNumber++;
+    await db.ref('autoMode/round').set(roundNumber);
+    console.log(`🔄 Round ${roundNumber}`);
+
+    // Reset game state
+    await db.ref('game/calledNumbers').remove();
+    await db.ref('game/status').set({ started: false });
+    await db.ref('game/pendingWinner').remove();
+    await db.ref('game/winners').set(null); // ✅ remove() አይደለም — allWinners ተጠብቋል
+    await db.ref('game/announcement').remove();
+    await db.ref('game/paid').set(false);
+    await db.ref('game/confirmedNumbers').remove();
+    await db.ref('game/prize').set(0);
+    await db.ref('game/total').set(0);
+    calledNumbers = [];
+
+    // Bots ያስወግዳቸው
+    const usersSnap = await db.ref('users').get();
+    const usersData = usersSnap.val() || {};
+    for (let uid in usersData) {
+      if (usersData[uid] && usersData[uid].is_bot) {
+        await db.ref('users/' + uid).remove();
+      }
+    }
+
+    await db.ref('autoMode/phase').set('countdown');
+
+    setTimeout(async () => {
+      if (!autoModeOn) return;
+      await startAutoCountdown();
+    }, 3000);
+
+  } catch (e) {
+    console.error('❌ scheduleNextRound error:', e.message);
+    // Auto recover
+    setTimeout(() => {
+      if (autoModeOn) startAutoCountdown();
+    }, 15000);
   }
-  await db.ref('autoMode/round').set(roundNumber);
-  await db.ref('autoMode/phase').set('countdown');
-  setTimeout(async () => {
-    if (!autoModeOn) return;
-    await startAutoCountdown();
-  }, 3000);
-    }
+}
