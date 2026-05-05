@@ -388,7 +388,7 @@ async function addOneBot(confData, usersData, bet, pct, botsNeeded) {
     remaining: botsNeeded - cardCount
   });
 
-  log(`✅ Bot added: ${botName} → Card #${cardId} | ${botsNeeded - 1} remaining`);
+  log(`✅ Bot added: ${botName} → Card #${selectedCards.join(',')} | ${botsNeeded - cardCount} remaining`);
 }
 
 // ══ KEEP ALIVE — no HTTP server (port conflict fix) ══
