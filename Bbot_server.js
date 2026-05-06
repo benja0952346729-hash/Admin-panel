@@ -171,7 +171,7 @@ function startBotEngine() {
   botEngineRunning = true;
   lastBotAddedTime = 0;
   log('Bot engine started — checking every 2 seconds');
-  botEngineTimer = setInterval(botEngineTick, 2000);
+  botEngineTimer = setInterval(botEngineTick, 1000);
 }
 
 function stopBotEngine() {
@@ -287,12 +287,12 @@ async function botEngineTick() {
     }
 
     // ── FORCE FILL: 30s → gap ሰፊ, እየጠበበ, 4-7s ሲቀር ይጨርሳሉ ──
-    if (remainSecs <= 30 && botsNeeded > 0) {
+    if (remainSecs <= 40 && botsNeeded > 0) {
       // Gap formula: exponential narrowing
       // 30s ሲቀር → gap ትልቅ (2500ms)
       // 7s ሲቀር → gap ትንሽ (200ms)
       // ratio = (remainSecs - 7) / (30 - 7) → 0..1
-      const ratio = Math.max(0, Math.min(1, (remainSecs - 7) / 23));
+      const ratio = Math.max(0, Math.min(1, (remainSecs - 7) / 33));
       // exponential: ratio^2 makes it narrow faster near the end
       const gapMs = 200 + Math.pow(ratio, 1.8) * 2300; // 200ms..2500ms
       // ±15% human-like variation
@@ -324,7 +324,7 @@ async function botEngineTick() {
     let adjustedGap = baseGap * speedFactor;
 
     // Clamp: min 1.5s, max 12s
-    adjustedGap = Math.max(1500, Math.min(12000, adjustedGap));
+    adjustedGap = Math.max(800, Math.min(6000, adjustedGap));
 
     // Human-like random variation ±25%
     const variation = adjustedGap * 0.25;
