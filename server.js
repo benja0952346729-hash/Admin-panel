@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const app = express();
 const path = require('path');
+const https = require('https');
 
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 admin.initializeApp({
@@ -16,6 +17,61 @@ app.use(express.static(__dirname));
 app.use(express.json());
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
+
+// ══ CLOUDINARY SOUNDS ══
+const CLOUDINARY_CLOUD = 'diado1bxi';
+const CLOUDINARY_API_KEY = '117446111831141';
+const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_SECRET || 'biCrRU-O4tFt_icW8ONKE5POXJk';
+
+let soundsMap = {};
+
+async function loadCloudinarySounds() {
+  return new Promise((resolve) => {
+    const auth = Buffer.from(`${CLOUDINARY_API_KEY}:${CLOUDINARY_API_SECRET}`).toString('base64');
+    const options = {
+      hostname: 'api.cloudinary.com',
+      path: `/v1_1/${CLOUDINARY_CLOUD}/resources/video?max_results=100`,
+      method: 'GET',
+      headers: { 'Authorization': `Basic ${auth}` }
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data);
+          const resources = json.resources || [];
+          resources.forEach(r => {
+            const publicId = r.public_id;
+            // suffix አስወግድ: "B1_lecny2" → "B1"
+            const key = publicId.replace(/_[a-z0-9]+$/i, '');
+            soundsMap[key] = r.secure_url;
+          });
+          console.log(`✅ Loaded ${Object.keys(soundsMap).length} sounds from Cloudinary`);
+        } catch(e) {
+          console.error('❌ Cloudinary parse error:', e.message);
+        }
+        resolve();
+      });
+    });
+
+    req.on('error', (e) => {
+      console.error('❌ Cloudinary load error:', e.message);
+      resolve();
+    });
+
+    req.end();
+  });
+}
+
+// Client sounds map endpoint
+app.get('/sounds-map', (req, res) => {
+  res.json(soundsMap);
+});
+
+// Startup ላይ sounds load አድርግ
+loadCloudinarySounds();
 
 // ══ CONFIRM CARD ══
 app.post('/confirm-card', async (req, res) => {
@@ -169,23 +225,14 @@ async function startAutoGame() {
   }
 }
 
-// ══ CALL NUMBER ══
-// Logic:
-//   1. Bot win percent roll → target card ይወሰናል (bias draw ለዚህ card)
-//   2. እያንዳንዱ number call ሲሆን → ሁሉም cards ይፈተሻሉ
-//   3. ቀድሞ line የሞላ card → ያሸንፋል (bot든 real든)
-
 async function autoCallNumber(speed) {
   if (!autoModeOn) return;
   clearInterval(callTimer);
 
-  // ══ Step 1: ሁሉም cards scan ══
   const confSnap = await db.ref('game/confirmedNumbers').get();
   const allCards = confSnap.val() || {};
 
-  // ሁሉም card info ሰብስብ (bot/real)
-  const cardInfoMap = {}; // cardId → { user, displayName, isBot }
-
+  const cardInfoMap = {};
   const realCards = [];
   const botCards = [];
 
@@ -201,7 +248,6 @@ async function autoCallNumber(speed) {
     else realCards.push(entry);
   }
 
-  // ══ Step 2: Percent roll — bias target decide ══
   const botPctSnap = await db.ref('autoMode/botWinPercent').get();
   const botWinPercent = Math.min(100, Math.max(0, botPctSnap.val() ?? 50));
   const roll = Math.floor(Math.random() * 100) + 1;
@@ -211,18 +257,14 @@ async function autoCallNumber(speed) {
   if (roll <= botWinPercent) {
     if (botCards.length > 0) {
       targetCard = botCards[Math.floor(Math.random() * botCards.length)];
-      console.log(`🎲 Bias → Card#${targetCard.cardId}`);
     } else {
       targetCard = realCards.length > 0 ? realCards[Math.floor(Math.random() * realCards.length)] : null;
-      console.log(`🎲 Bias → Card#${targetCard?.cardId}`);
     }
   } else {
     if (realCards.length > 0) {
       targetCard = realCards[Math.floor(Math.random() * realCards.length)];
-      console.log(`🎲 Bias → Card#${targetCard.cardId}`);
     } else {
       targetCard = botCards.length > 0 ? botCards[Math.floor(Math.random() * botCards.length)] : null;
-      console.log(`🎲 Bias → Card#${targetCard?.cardId}`);
     }
   }
 
@@ -232,18 +274,14 @@ async function autoCallNumber(speed) {
     return;
   }
 
-  // ══ Step 3: Target card board (bias draw ለዚህ) ══
   const targetBoard = generateBoard(Number(targetCard.cardId));
   const neededNums = targetBoard.filter(n => n !== 'FREE');
-  console.log(`🎯 Bias target: Card#${targetCard.cardId} — needs: [${neededNums.join(',')}]`);
 
-  // ══ Step 4: ሁሉም cards boards ሰብስብ ══
   const allBoards = {};
   for (let cardId in cardInfoMap) {
     allBoards[cardId] = generateBoard(Number(cardId));
   }
 
-  // ══ Step 5: Interval — call + ሁሉም cards check ══
   callTimer = setInterval(async () => {
     try {
       if (!autoModeOn) { clearInterval(callTimer); return; }
@@ -255,11 +293,9 @@ async function autoCallNumber(speed) {
         return;
       }
 
-      // ያልተጠሩ ቁጥሮች
       const used = new Set(calledNumbers);
       const remaining = [...Array(75)].map((_, i) => i + 1).filter(n => !used.has(n));
 
-      // ══ 75 ሙሉ — refund ══
       if (!remaining.length) {
         clearInterval(callTimer);
         console.log('⚠️ All 75 called — refunding...');
@@ -284,7 +320,6 @@ async function autoCallNumber(speed) {
         return;
       }
 
-      // ══ Smart draw: bias target card ቁጥሮች ቅድሚያ ══
       const neededRemaining = remaining.filter(n => neededNums.includes(n) && !calledNumbers.includes(n));
 
       let n;
@@ -298,13 +333,11 @@ async function autoCallNumber(speed) {
       await db.ref('game/calledNumbers').push(n);
       console.log(`📢 ${getLetter(n)}${n}`);
 
-      // prize update
       const totalSnap = await db.ref('game/total').get();
       const pctSnap = await db.ref('game/percent').get();
       const prize = Math.floor((totalSnap.val() || 0) * ((pctSnap.val() || 80) / 100));
       await db.ref('game/prize').set(prize);
 
-      // ══ ሁሉም cards ፈትሽ — ቀድሞ line የሞላ ያሸንፋል ══
       const winners = [];
       for (let cardId in allBoards) {
         const board = allBoards[cardId];
