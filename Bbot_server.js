@@ -124,7 +124,7 @@ onValue(ref(db, 'game/countdown'), (snap) => {
   const val = snap.val();
   if (val && val.active && val.startAt) {
     countdownStartAt = val.startAt;
-    currentCdMinutes = val.cdMinutes || 3;
+    currentCdMinutes = val.cdMinutes || val.mins || 3;
     realPlayerEntryTimes = []; // reset on new countdown
     log(`Countdown detected: ${currentCdMinutes} min, starts at ${new Date(val.startAt).toLocaleTimeString()}`);
 
@@ -233,7 +233,7 @@ async function botEngineTick() {
     const now = Date.now();
     const remainMs = Math.max(0, cdData.startAt - now);
     const remainSecs = remainMs / 1000;
-    const totalSecs = (cdData.cdMinutes || currentCdMinutes) * 60;
+    const totalSecs = (cdData.cdMinutes || cdData.mins || currentCdMinutes) * 60;
     const elapsedSecs = totalSecs - remainSecs;
 
     // 5s ይጠብቃል
