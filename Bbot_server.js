@@ -184,19 +184,16 @@ function stopBotEngine() {
 }
 
 async function botEngineTick() {
-  if (!smartBotEnabled) {
-    stopBotEngine();
-    return;
-  }
+  if (!smartBotEnabled) { stopBotEngine(); return; }
 
   try {
-    // ── Read current game state ──
-    const [confSnap, betSnap, pctSnap, statusSnap, cdSnap] = await Promise.all([
+    const [confSnap, betSnap, pctSnap, statusSnap, cdSnap, usersSnap] = await Promise.all([
       get(ref(db, 'game/confirmedNumbers')),
       get(ref(db, 'game/bet')),
       get(ref(db, 'game/percent')),
       get(ref(db, 'game/status')),
       get(ref(db, 'game/countdown')),
+      get(ref(db, 'users')),
     ]);
 
     const confData = confSnap.val() || {};
@@ -204,143 +201,86 @@ async function botEngineTick() {
     const pct = (pctSnap.val() || 80) / 100;
     const statusData = statusSnap.val() || {};
     const cdData = cdSnap.val() || {};
+    const usersData = usersSnap.val() || {};
 
-    // ── Game ሲጀምር bot አይገባም ──
+    // Game ሲጀምር bot አይገባም
     if (statusData.started) {
       await set(ref(db, 'smartBot/status'), 'GAME_LIVE');
       return;
     }
 
-    // ── Don't add bots if no countdown ──
+    // Countdown ከሌለ ይጠብቃል
     if (!cdData.active || !cdData.startAt) {
       await set(ref(db, 'smartBot/status'), 'WAITING');
       return;
     }
 
-    // ── Count real vs bot players ──
-    const usersSnap = await get(ref(db, 'users'));
-    const usersData = usersSnap.val() || {};
-    const botIds = new Set(
-      Object.keys(usersData).filter(uid => usersData[uid]?.is_bot === true)
-    );
-
+    // Count real vs bot
+    const botIds = new Set(Object.keys(usersData).filter(uid => usersData[uid]?.is_bot === true));
     let realPlayers = 0;
-    let botPlayers = 0;
     const allEntries = Object.values(confData);
-    allEntries.forEach(uid => {
-      if (botIds.has(String(uid))) botPlayers++;
-      else realPlayers++;
-    });
+    allEntries.forEach(uid => { if (!botIds.has(String(uid))) realPlayers++; });
 
     const total = allEntries.length;
     const botsNeeded = Math.max(0, 100 - total);
 
-    // ── Update admin UI stats ──
-    await update(ref(db, 'smartBot'), {
-      realPlayers,
-      botPlayers,
-      total,
-      botsNeeded,
-      lastTick: Date.now()
-    });
-
     if (botsNeeded <= 0) {
       await set(ref(db, 'smartBot/status'), 'FULL');
-      log('100/100 — Full!');
       return;
     }
 
-    // ── Timing calculations ──
+    // Timing
     const now = Date.now();
     const remainMs = Math.max(0, cdData.startAt - now);
     const remainSecs = remainMs / 1000;
     const totalSecs = (cdData.cdMinutes || currentCdMinutes) * 60;
     const elapsedSecs = totalSecs - remainSecs;
 
-    // Wait 5 seconds after countdown starts
+    // 5s ይጠብቃል
     if (elapsedSecs < 5) {
       await set(ref(db, 'smartBot/status'), 'WAITING_5S');
       return;
     }
 
-    // ── Real player speed (per second) ──
+    // ══ PURE BALANCE CALCULATION ══
+    // Real player rate per second so far
     const realRate = elapsedSecs > 0 ? realPlayers / elapsedSecs : 0;
-    const realRatePerMin = realRate * 60;
 
-    // ── Project real players by end ──
-    const expectedRealByEnd = Math.min(100, Math.round(realRate * totalSecs));
-    const projectedBotsNeeded = Math.max(0, 100 - expectedRealByEnd);
+    // Project how many real players will join by end
+    const projectedReal = Math.min(100, realRate * totalSecs);
 
-    // ── Over-pace check ──
-    // If real players are joining much faster than normal pace → pause bots
-    const normalPaceAtThisPoint = (realPlayers / totalSecs) * elapsedSecs;
-    const overpaceRatio = realPlayers / Math.max(1, normalPaceAtThisPoint);
+    // How many bots still needed considering projection
+    const projectedBotsNeeded = Math.max(1, Math.ceil(100 - projectedReal));
 
-    if (overpaceRatio > 2.0 && realPlayers > 5) {
-      await set(ref(db, 'smartBot/status'), 'PAUSED_OVERPACE');
-      await update(ref(db, 'smartBot'), {
-        realSpeed: realRatePerMin.toFixed(1),
-        botSpeed: '0'
-      });
-      log(`⏸ Over-pace! Real: ${realPlayers}, ratio: ${overpaceRatio.toFixed(1)}x — pausing bots`);
+    // Time window to finish: target finish at 5s remaining
+    const timeWindow = Math.max(1, remainSecs - 5);
+
+    // Required bot rate: bots per second
+    const requiredRate = botsNeeded / timeWindow;
+
+    // Gap between bots in ms
+    let gapMs = 1000 / requiredRate;
+
+    // Over-pace: real players joining way too fast → pause bots
+    const expectedRealNow = realRate > 0 ? realRate * totalSecs : 0;
+    if (realPlayers > projectedBotsNeeded && realRate * totalSecs > 90 && realPlayers > 10) {
+      await set(ref(db, 'smartBot/status'), 'PAUSED_REAL_FAST');
+      log(`⏸ Real players filling fast (${realPlayers}) — pausing`);
       return;
     }
 
-    // ── FORCE FILL: 30s → gap ሰፊ, እየጠበበ, 4-7s ሲቀር ይጨርሳሉ ──
-    if (remainSecs <= 40 && botsNeeded > 0) {
-      // Gap formula: exponential narrowing
-      // 30s ሲቀር → gap ትልቅ (2500ms)
-      // 7s ሲቀር → gap ትንሽ (200ms)
-      // ratio = (remainSecs - 7) / (30 - 7) → 0..1
-      const ratio = Math.max(0, Math.min(1, (remainSecs - 7) / 33));
-      // exponential: ratio^2 makes it narrow faster near the end
-      const gapMs = 200 + Math.pow(ratio, 1.8) * 2300; // 200ms..2500ms
-      // ±15% human-like variation
-      const variation = gapMs * 0.15;
-      const actualDelay = Math.max(150, gapMs + (Math.random() * variation * 2 - variation));
+    // Human-like variation ±20%
+    const variation = gapMs * 0.20;
+    gapMs = gapMs + (Math.random() * variation * 2 - variation);
 
-      log(`⚡ ${Math.round(remainSecs)}s → gap:${Math.round(actualDelay)}ms | ${botsNeeded} bots left`);
+    // Safety: min 250ms, max 10s
+    gapMs = Math.max(250, Math.min(10000, gapMs));
 
-      // Add ONE bot per tick — loop handles the rest via next tick
-      const freshSnap = await get(ref(db, 'game/confirmedNumbers'));
-      const freshData = freshSnap.val() || {};
-      const freshUsers = await get(ref(db, 'users'));
-      const freshNeeded = Math.max(0, 100 - Object.keys(freshData).length);
-      if (freshNeeded <= 0) {
-        log('✅ 100/100 Full!');
-        return;
-      }
-      await new Promise(r => setTimeout(r, actualDelay));
-      await addOneBot(freshData, freshUsers.val() || {}, bet, pct, freshNeeded);
-      return;
-    }
+    await set(ref(db, 'smartBot/status'), `ACTIVE|${Math.round(remainSecs)}s|gap:${Math.round(gapMs)}ms`);
+    log(`📊 ${Math.round(remainSecs)}s | real:${realPlayers} | bots:${botsNeeded} | gap:${Math.round(gapMs)}ms`);
 
-    // ── Calculate natural bot entry gap ──
-    // Spread remaining bots over remaining time naturally
-    const baseGap = remainSecs > 5 ? (remainMs / Math.max(1, projectedBotsNeeded)) : 1500;
-
-    // More real players → bigger gap, fewer → smaller gap
-    const speedFactor = 1 + (realRatePerMin / 10);
-    let adjustedGap = baseGap * speedFactor;
-
-    // Clamp: min 1.5s, max 12s
-    adjustedGap = Math.max(800, Math.min(6000, adjustedGap));
-
-    // Human-like random variation ±25%
-    const variation = adjustedGap * 0.25;
-    const actualGap = adjustedGap + (Math.random() * variation * 2 - variation);
-
-    nextBotDelay = actualGap;
-
-    await update(ref(db, 'smartBot'), {
-      realSpeed: realRatePerMin.toFixed(1),
-      botSpeed: (60000 / actualGap).toFixed(1),
-      status: 'ACTIVE',
-      nextBotIn: Math.round(actualGap / 1000)
-    });
-
-    // ── Add bot only if delay has passed ──
-    if (now - lastBotAddedTime >= actualGap) {
+    // Add bot only if enough time has passed since last bot
+    if (now - lastBotAddedTime >= gapMs) {
       await addOneBot(confData, usersData, bet, pct, botsNeeded);
     }
 
