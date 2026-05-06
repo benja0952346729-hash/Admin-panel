@@ -286,15 +286,28 @@ async function botEngineTick() {
       return;
     }
 
-    // ── FORCE FILL: ቀሪ 30 ሰከንድ ሲቀር ሁሉም ቀሪ bots ፈጠን ይሞሉ ──
+    // ── FORCE FILL: ቀሪ 30 ሰከንድ ሲሆን → 4-8s ሲቀር ይጨርሱ ──
     if (remainSecs <= 30 && botsNeeded > 0) {
-      log(`⚡ ${Math.round(remainSecs)}s remaining — force filling ${botsNeeded} bots!`);
+      // Target: finish between 4-8s remaining
+      // Available window: remainSecs - 6 (target finish at ~6s)
+      const targetFinishAt = 6; // seconds remaining when done
+      const availableWindow = Math.max(1, remainSecs - targetFinishAt); // seconds to spread bots
+      const gapMs = (availableWindow * 1000) / botsNeeded; // ms between each bot
+      const clampedGap = Math.max(200, Math.min(gapMs, 2000)); // min 200ms, max 2s
+
+      log(`⚡ ${Math.round(remainSecs)}s remaining — filling ${botsNeeded} bots over ${availableWindow.toFixed(1)}s (gap: ${Math.round(clampedGap)}ms)`);
+
       for (let i = 0; i < botsNeeded; i++) {
+        // Random variation ±20%
+        const variation = clampedGap * 0.2;
+        const actualDelay = clampedGap + (Math.random() * variation * 2 - variation);
+        await new Promise(r => setTimeout(r, actualDelay));
         const freshSnap = await get(ref(db, 'game/confirmedNumbers'));
         const freshData = freshSnap.val() || {};
         const freshUsers = await get(ref(db, 'users'));
-        await addOneBot(freshData, freshUsers.val() || {}, bet, pct, botsNeeded - i);
-        await new Promise(r => setTimeout(r, 200 + Math.random() * 300));
+        const freshNeeded = Math.max(0, 100 - Object.keys(freshData).length);
+        if (freshNeeded <= 0) break;
+        await addOneBot(freshData, freshUsers.val() || {}, bet, pct, freshNeeded);
       }
       log('✅ Force fill complete — 100/100');
       return;
