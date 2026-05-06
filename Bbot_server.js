@@ -293,7 +293,7 @@ async function botEngineTick() {
       const targetFinishAt = 6; // seconds remaining when done
       const availableWindow = Math.max(1, remainSecs - targetFinishAt); // seconds to spread bots
       const gapMs = (availableWindow * 1000) / botsNeeded; // ms between each bot
-      const clampedGap = Math.max(200, Math.min(gapMs, 2000)); // min 200ms, max 2s
+      const clampedGap = Math.max(400, Math.min(gapMs, 3000)); // min 400ms, max 3s
 
       log(`⚡ ${Math.round(remainSecs)}s remaining — filling ${botsNeeded} bots over ${availableWindow.toFixed(1)}s (gap: ${Math.round(clampedGap)}ms)`);
 
