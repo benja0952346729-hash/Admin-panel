@@ -44,8 +44,9 @@ async function loadCloudinarySounds() {
           const resources = json.resources || [];
           resources.forEach(r => {
             const publicId = r.public_id;
-            // suffix አስወግድ: "B1_lecny2" → "B1"
-            const key = publicId.replace(/[_-][a-z0-9]+$/i, '');
+            // suffix አስወግድ: "B1_lecny2" → "B1", "B1-2_xxx" → "B1"
+            const match = publicId.match(/^([A-Z]+\d+)/);
+            const key = match ? match[1] : publicId;
             soundsMap[key] = r.secure_url;
           });
           console.log(`✅ Loaded ${Object.keys(soundsMap).length} sounds from Cloudinary`);
