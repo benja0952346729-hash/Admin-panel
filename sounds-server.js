@@ -1,8 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const https = require('https');
-const fs = require('fs');
-const EdgeTTS = require('edge-tts-node');
+const { MsEdgeTTS, OUTPUT_FORMAT } = require('msedge-tts'); // ✅ msedge-tts
 
 const app = express();
 app.use(cors());
@@ -43,21 +42,19 @@ function getBingoLetter(n) {
 // ══ TTS CACHE ══
 const ttsCache = {};
 
-// ══ edge-tts-node — ወንድ አማርኛ ድምፅ ══
-function fetchTTS(text) {
-  return new Promise(async (resolve, reject) => {
-    const filename = `/tmp/tts_${Date.now()}.mp3`;
-    try {
-      const tts = new EdgeTTS();
-      await tts.setVoice('am-ET-AmehaNeural');
-      await tts.toFile(text, filename);
-      const buffer = fs.readFileSync(filename);
-      try { fs.unlinkSync(filename); } catch(e) {}
-      resolve({ buffer, type: 'audio/mpeg' });
-    } catch(e) {
-      try { fs.unlinkSync(filename); } catch(err) {}
-      reject(new Error('edge-tts-node failed: ' + e.message));
-    }
+// ══ msedge-tts — ወንድ አማርኛ ድምፅ (am-ET-AmehaNeural) ══
+async function fetchTTS(text) {
+  const tts = new MsEdgeTTS();
+  await tts.setMetadata(
+    'am-ET-AmehaNeural',  // ✅ ወንድ ድምፅ
+    OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3
+  );
+  return new Promise((resolve, reject) => {
+    const { audioStream } = tts.toStream(text);
+    const chunks = [];
+    audioStream.on('data', chunk => chunks.push(chunk));
+    audioStream.on('end', () => resolve({ buffer: Buffer.concat(chunks), type: 'audio/mpeg' }));
+    audioStream.on('error', reject);
   });
 }
 
@@ -197,6 +194,7 @@ app.post('/sounds-reload', async (req, res) => {
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
+    voice: 'am-ET-AmehaNeural (ወንድ)',
     ttsCache: Object.keys(ttsCache).length,
     sounds: Object.keys(soundsMap).length,
     cachedNumbers: Object.keys(ttsCache).filter(k => k.startsWith('num_')).length
@@ -208,6 +206,7 @@ const PORT = process.env.PORT || 3001;
 
 loadCloudinarySounds().then(() => {
   app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`🎙️ Voice: am-ET-AmehaNeural (ወንድ ድምፅ)`);
   });
 });
