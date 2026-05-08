@@ -3,7 +3,8 @@ const express = require('express');
 const cors = require('cors');
 const app = express();
 const path = require('path');
-const EdgeTTS = require('edge-tts-node');
+const https = require('https');
+const { MsEdgeTTS, OUTPUT_FORMAT } = require('msedge-tts'); // ✅ ወንድ ድምፅ
 const fs = require('fs');
 
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -44,64 +45,47 @@ function getBingoLetter(n){
 
 const ttsCache = {};
 
-// ══ edge-tts-node — ወንድ አማርኛ ድምፅ ══
+// ══ msedge-tts — ወንድ አማርኛ ድምፅ ✅ ══
 async function fetchTTS(text) {
-  const filename = `/tmp/tts_${Date.now()}_${Math.random().toString(36).slice(2)}.mp3`;
-  try {
-    const tts = new EdgeTTS();
-    await tts.setVoice('am-ET-AmehaNeural'); // ✅ ወንድ ድምፅ
-    await tts.toFile(text, filename);
-    const buffer = fs.readFileSync(filename);
-    try { fs.unlinkSync(filename); } catch(e) {}
-    return { buffer, type: 'audio/mpeg' };
-  } catch(e) {
-    try { fs.unlinkSync(filename); } catch(err) {}
-    throw new Error('edge-tts-node failed: ' + e.message);
-  }
+  const tts = new MsEdgeTTS();
+  await tts.setMetadata(
+    'am-ET-AmehaNeural',
+    OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3
+  );
+  return new Promise((resolve, reject) => {
+    const { audioStream } = tts.toStream(text);
+    const chunks = [];
+    audioStream.on('data', chunk => chunks.push(chunk));
+    audioStream.on('end', () => resolve({ buffer: Buffer.concat(chunks), type: 'audio/mpeg' }));
+    audioStream.on('error', reject);
+  });
 }
 
-app.get('/tts/number/:n', async (req, res) => {
-  const n = parseInt(req.params.n);
-  if(!n || n < 1 || n > 75) return res.status(400).end();
-  const key = 'num_' + n;
-  if(ttsCache[key]){
-    res.set('Content-Type', 'audio/mpeg');
-    res.set('Cache-Control', 'public, max-age=86400');
-    return res.send(ttsCache[key]);
-  }
-  try {
-    const text = `${getBingoLetter(n)}... ${AMHARIC_NUMBERS[n]}`;
-    const { buffer, type } = await fetchTTS(text);
-    ttsCache[key] = buffer;
-    res.set('Content-Type', type);
-    res.set('Cache-Control', 'public, max-age=86400');
-    res.send(buffer);
-  } catch(e) {
-    console.error('TTS error:', e.message);
-    res.status(500).end();
-  }
+app.get('/tts/number/:n',async(req,res)=>{
+  const n=parseInt(req.params.n);
+  if(!n||n<1||n>75)return res.status(400).end();
+  const key='num_'+n;
+  if(ttsCache[key]){res.set('Content-Type','audio/mpeg');res.set('Cache-Control','public,max-age=86400');return res.send(ttsCache[key]);}
+  try{
+    const text=`${getBingoLetter(n)}... ${AMHARIC_NUMBERS[n]}`;
+    const {buffer}=await fetchTTS(text);
+    ttsCache[key]=buffer;
+    res.set('Content-Type','audio/mpeg');res.set('Cache-Control','public,max-age=86400');res.send(buffer);
+  }catch(e){console.error('TTS error:',e.message);res.status(500).end();}
 });
 
-app.get('/tts/winner', async (req, res) => {
-  if(ttsCache['winner']){
-    res.set('Content-Type', 'audio/mpeg');
-    return res.send(ttsCache['winner']);
-  }
-  try {
-    const { buffer, type } = await fetchTTS('ቢንጎ! አሸናፊ ተገኘ!');
-    ttsCache['winner'] = buffer;
-    res.set('Content-Type', type);
-    res.send(buffer);
-  } catch(e) {
-    console.error('TTS winner error:', e.message);
-    res.status(500).end();
-  }
+app.get('/tts/winner',async(req,res)=>{
+  if(ttsCache['winner']){res.set('Content-Type','audio/mpeg');return res.send(ttsCache['winner']);}
+  try{
+    const {buffer}=await fetchTTS('ቢንጎ! አሸናፊ ተገኘ!');
+    ttsCache['winner']=buffer;
+    res.set('Content-Type','audio/mpeg');res.send(buffer);
+  }catch(e){console.error('TTS winner error:',e.message);res.status(500).end();}
 });
 
-console.log('🔊 TTS endpoints ready (am-ET-AmehaNeural - ወንድ ድምፅ)!');
+console.log('🔊 TTS endpoints ready (am-ET-AmehaNeural ወንድ ድምፅ)!');
 
 // ══ CLOUDINARY SOUNDS ══
-const https = require('https');
 const CLOUDINARY_CLOUD = 'diado1bxi';
 const CLOUDINARY_API_KEY = '117446111831141';
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_SECRET || 'biCrRU-O4tFt_icW8ONKE5POXJk';
@@ -117,7 +101,6 @@ async function loadCloudinarySounds() {
       method: 'GET',
       headers: { 'Authorization': `Basic ${auth}` }
     };
-
     const req = https.request(options, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
@@ -138,20 +121,12 @@ async function loadCloudinarySounds() {
         resolve();
       });
     });
-
-    req.on('error', (e) => {
-      console.error('❌ Cloudinary load error:', e.message);
-      resolve();
-    });
-
+    req.on('error', (e) => { console.error('❌ Cloudinary load error:', e.message); resolve(); });
     req.end();
   });
 }
 
-app.get('/sounds-map', (req, res) => {
-  res.json(soundsMap);
-});
-
+app.get('/sounds-map', (req, res) => res.json(soundsMap));
 loadCloudinarySounds();
 
 // ══ CONFIRM CARD ══
@@ -200,7 +175,6 @@ let roundNumber = 1;
 
 console.log('🚀 Bingo Server Started!');
 
-// ══ HELPERS ══
 function getLetter(n) {
   if (n <= 15) return 'B';
   if (n <= 30) return 'I';
@@ -219,9 +193,9 @@ function generateBoard(seed) {
     }
     return arr;
   }
-  let B = getNums(1, 15, seed + 1), I = getNums(16, 30, seed + 2),
-    N = getNums(31, 45, seed + 3), G = getNums(46, 60, seed + 4),
-    O = getNums(61, 75, seed + 5);
+  let B = getNums(1,15,seed+1), I = getNums(16,30,seed+2),
+      N = getNums(31,45,seed+3), G = getNums(46,60,seed+4),
+      O = getNums(61,75,seed+5);
   let b = [];
   for (let i = 0; i < 5; i++) b.push(B[i], I[i], N[i], G[i], O[i]);
   b[12] = 'FREE';
@@ -246,7 +220,7 @@ function clearAllTimers() {
   clearInterval(announceTimer); announceTimer = null;
 }
 
-// ══ AUTO MODE LISTENER ══
+// ══ AUTO MODE ══
 db.ref('autoMode/on').on('value', async snap => {
   const val = snap.val();
   if (val === true && !autoModeOn) {
@@ -265,7 +239,6 @@ db.ref('autoMode/on').on('value', async snap => {
   }
 });
 
-// ══ COUNTDOWN ══
 async function startAutoCountdown() {
   if (!autoModeOn) return;
   clearAllTimers();
@@ -282,7 +255,6 @@ async function startAutoCountdown() {
   }, 1000);
 }
 
-// ══ START GAME ══
 async function startAutoGame() {
   if (!autoModeOn) return;
   try {
@@ -297,8 +269,7 @@ async function startAutoGame() {
     await db.ref('autoMode/phase').set('playing');
     console.log('🎮 Game Started!');
     const speedSnap = await db.ref('autoMode/callSpeed').get();
-    const callSpeed = speedSnap.val() || 6000;
-    autoCallNumber(callSpeed);
+    autoCallNumber(speedSnap.val() || 6000);
   } catch (e) {
     console.error('❌ startAutoGame error:', e.message);
     await db.ref('autoMode/phase').set('error');
@@ -312,204 +283,120 @@ async function autoCallNumber(speed) {
 
   const confSnap = await db.ref('game/confirmedNumbers').get();
   const allCards = confSnap.val() || {};
-
-  const cardInfoMap = {};
-  const realCards = [];
-  const botCards = [];
+  const cardInfoMap = {}, realCards = [], botCards = [];
 
   for (let cardId in allCards) {
     const uid = allCards[cardId];
-    const isBotSnap = await db.ref('users/' + uid + '/is_bot').get();
-    const isBot = isBotSnap.val() === true;
-    const displaySnap = await db.ref('users/' + uid + '/display').get();
-    const name = displaySnap.val() || String(uid);
+    const isBot = (await db.ref('users/' + uid + '/is_bot').get()).val() === true;
+    const name = (await db.ref('users/' + uid + '/display').get()).val() || String(uid);
     const entry = { user: uid, displayName: name, cardId, isBot };
     cardInfoMap[cardId] = entry;
-    if (isBot) botCards.push(entry);
-    else realCards.push(entry);
+    if (isBot) botCards.push(entry); else realCards.push(entry);
   }
 
-  const botPctSnap = await db.ref('autoMode/botWinPercent').get();
-  const botWinPercent = Math.min(100, Math.max(0, botPctSnap.val() ?? 50));
+  const botWinPercent = Math.min(100, Math.max(0, (await db.ref('autoMode/botWinPercent').get()).val() ?? 50));
   const roll = Math.floor(Math.random() * 100) + 1;
-
   let targetCard = null;
-
   if (roll <= botWinPercent) {
-    if (botCards.length > 0) {
-      targetCard = botCards[Math.floor(Math.random() * botCards.length)];
-    } else {
-      targetCard = realCards.length > 0 ? realCards[Math.floor(Math.random() * realCards.length)] : null;
-    }
+    targetCard = botCards.length > 0 ? botCards[Math.floor(Math.random() * botCards.length)]
+      : realCards.length > 0 ? realCards[Math.floor(Math.random() * realCards.length)] : null;
   } else {
-    if (realCards.length > 0) {
-      targetCard = realCards[Math.floor(Math.random() * realCards.length)];
-    } else {
-      targetCard = botCards.length > 0 ? botCards[Math.floor(Math.random() * botCards.length)] : null;
-    }
+    targetCard = realCards.length > 0 ? realCards[Math.floor(Math.random() * realCards.length)]
+      : botCards.length > 0 ? botCards[Math.floor(Math.random() * botCards.length)] : null;
   }
 
-  if (!targetCard) {
-    console.log('⚠️ No cards found — ending game');
-    await scheduleNextRound();
-    return;
-  }
+  if (!targetCard) { console.log('⚠️ No cards'); await scheduleNextRound(); return; }
 
-  const targetBoard = generateBoard(Number(targetCard.cardId));
-  const neededNums = targetBoard.filter(n => n !== 'FREE');
-
+  const neededNums = generateBoard(Number(targetCard.cardId)).filter(n => n !== 'FREE');
   const allBoards = {};
-  for (let cardId in cardInfoMap) {
-    allBoards[cardId] = generateBoard(Number(cardId));
-  }
+  for (let cardId in cardInfoMap) allBoards[cardId] = generateBoard(Number(cardId));
 
   callTimer = setInterval(async () => {
     try {
       if (!autoModeOn) { clearInterval(callTimer); return; }
-
-      const pendSnap = await db.ref('game/pendingWinner').get();
-      if (pendSnap.val() && !pendSnap.val().announced) {
-        clearInterval(callTimer);
-        startAutoAnnounce();
-        return;
-      }
+      const pend = (await db.ref('game/pendingWinner').get()).val();
+      if (pend && !pend.announced) { clearInterval(callTimer); startAutoAnnounce(); return; }
 
       const used = new Set(calledNumbers);
       const remaining = [...Array(75)].map((_, i) => i + 1).filter(n => !used.has(n));
 
       if (!remaining.length) {
         clearInterval(callTimer);
-        console.log('⚠️ All 75 called — refunding...');
-        const betSnap = await db.ref('game/bet').get();
-        const bet = betSnap.val() || 0;
+        const bet = (await db.ref('game/bet').get()).val() || 0;
         for (let cardId in allCards) {
           const uid = allCards[cardId];
-          const isBotSnap = await db.ref('users/' + uid + '/is_bot').get();
-          if (isBotSnap.val() === true) continue;
+          if ((await db.ref('users/' + uid + '/is_bot').get()).val() === true) continue;
           const uRef = db.ref('users/' + uid + '/balance');
-          const s = await uRef.get();
-          await uRef.set((s.val() || 0) + bet);
-          await db.ref('notifications/' + uid).set({
-            message: `⚠️ Game ሳይጠናቀቅ ተዘጋ — ${bet} ብር ተመለሰ!`,
-            time: Date.now(), read: false
-          });
+          await uRef.set(((await uRef.get()).val() || 0) + bet);
+          await db.ref('notifications/' + uid).set({ message: `⚠️ Game ሳይጠናቀቅ ተዘጋ — ${bet} ብር ተመለሰ!`, time: Date.now(), read: false });
         }
-        await db.ref('game/announcement').set({
-          type: 'no_winner', message: 'ምንም አሸናፊ አልተገኘም — ብር ተመለሰ', time: Date.now()
-        });
+        await db.ref('game/announcement').set({ type: 'no_winner', message: 'ምንም አሸናፊ አልተገኘም', time: Date.now() });
         await scheduleNextRound();
         return;
       }
 
       const neededRemaining = remaining.filter(n => neededNums.includes(n) && !calledNumbers.includes(n));
-
-      let n;
-      if (neededRemaining.length > 0 && Math.random() < 0.65) {
-        n = neededRemaining[Math.floor(Math.random() * neededRemaining.length)];
-      } else {
-        n = remaining[Math.floor(Math.random() * remaining.length)];
-      }
+      const n = (neededRemaining.length > 0 && Math.random() < 0.65)
+        ? neededRemaining[Math.floor(Math.random() * neededRemaining.length)]
+        : remaining[Math.floor(Math.random() * remaining.length)];
 
       calledNumbers.push(n);
       await db.ref('game/calledNumbers').push(n);
       console.log(`📢 ${getLetter(n)}${n}`);
 
-      const totalSnap = await db.ref('game/total').get();
-      const pctSnap = await db.ref('game/percent').get();
-      const prize = Math.floor((totalSnap.val() || 0) * ((pctSnap.val() || 80) / 100));
+      const prize = Math.floor(((await db.ref('game/total').get()).val() || 0) * (((await db.ref('game/percent').get()).val() || 80) / 100));
       await db.ref('game/prize').set(prize);
 
       const winners = [];
       for (let cardId in allBoards) {
-        const board = allBoards[cardId];
-        if (checkWin(board, calledNumbers)) {
-          const info = cardInfoMap[cardId];
-          winners.push({ ...info, time: Date.now() });
-          console.log(`🏆 Winner: Card#${cardId}`);
-        }
+        if (checkWin(allBoards[cardId], calledNumbers))
+          winners.push({ ...cardInfoMap[cardId], time: Date.now() });
       }
 
       if (winners.length > 0) {
         clearInterval(callTimer);
-        console.log(`🎉 ${winners.length} winner(s) found! Prize: ${prize}`);
-        await db.ref('game/pendingWinner').set({
-          winners,
-          prize,
-          announced: false,
-          time: Date.now()
-        });
+        await db.ref('game/pendingWinner').set({ winners, prize, announced: false, time: Date.now() });
         startAutoAnnounce();
       }
-
-    } catch (e) {
-      console.error('❌ callNumber error:', e.message);
-    }
+    } catch (e) { console.error('❌ callNumber error:', e.message); }
   }, speed);
 }
 
-// ══ ANNOUNCE ══
 async function startAutoAnnounce() {
   if (!autoModeOn) return;
   clearAllTimers();
   await db.ref('autoMode/phase').set('announcing');
   let count = 5;
   announceTimer = setInterval(async () => {
-    count--;
-    if (count <= 0) {
-      clearInterval(announceTimer);
-      await announceWinner();
-      await scheduleNextRound();
-    }
+    if (--count <= 0) { clearInterval(announceTimer); await announceWinner(); await scheduleNextRound(); }
   }, 1000);
 }
 
-// ══ ANNOUNCE WINNER ══
 async function announceWinner() {
   try {
-    const pendSnap = await db.ref('game/pendingWinner').get();
-    const data = pendSnap.val();
+    const data = (await db.ref('game/pendingWinner').get()).val();
     if (!data) return;
-
-    const winners = data.winners;
-    const prize = data.prize || 0;
+    const { winners, prize } = data;
     const share = Math.floor(prize / winners.length);
     let botWinShare = 0;
 
     for (let w of winners) {
-      if (w.isBot) {
-        botWinShare += share;
-        console.log(`🤖 Bot won ${share} ብር — profit kept`);
-        continue;
-      }
+      if (w.isBot) { botWinShare += share; continue; }
       const uRef = db.ref('users/' + w.user + '/balance');
-      const s = await uRef.get();
-      await uRef.set((s.val() || 0) + share);
-      await db.ref('notifications/' + w.user).set({
-        message: `🎉 አሸነፍክ! ${share} ብር balance ላይ ታከለ! Card #${w.cardId}`,
-        time: Date.now(), read: false
-      });
-      const profSnap = await db.ref('analytics/totalProfit').get();
-      await db.ref('analytics/totalProfit').set(Math.max(0, (profSnap.val() || 0) - share));
+      await uRef.set(((await uRef.get()).val() || 0) + share);
+      await db.ref('notifications/' + w.user).set({ message: `🎉 አሸነፍክ! ${share} ብር balance ላይ ታከለ! Card #${w.cardId}`, time: Date.now(), read: false });
+      await db.ref('analytics/totalProfit').set(Math.max(0, ((await db.ref('analytics/totalProfit').get()).val() || 0) - share));
     }
 
     if (botWinShare > 0) {
-      const profSnap = await db.ref('analytics/totalProfit').get();
-      await db.ref('analytics/totalProfit').set((profSnap.val() || 0) + botWinShare);
-      const bpSnap = await db.ref('analytics/botWinProfit').get();
-      await db.ref('analytics/botWinProfit').set((bpSnap.val() || 0) + botWinShare);
+      await db.ref('analytics/totalProfit').set(((await db.ref('analytics/totalProfit').get()).val() || 0) + botWinShare);
+      await db.ref('analytics/botWinProfit').set(((await db.ref('analytics/botWinProfit').get()).val() || 0) + botWinShare);
     }
 
     const winnersObj = {};
     winners.forEach((w, i) => { winnersObj[i] = { ...w, prize: share }; });
     await db.ref('game/winners').set(winnersObj);
-
-    for (const w of winners) {
-      await db.ref('allWinners').push({
-        user: w.user, displayName: w.displayName,
-        cardId: w.cardId, prize: share,
-        isBot: w.isBot || false, time: Date.now()
-      });
-    }
+    for (const w of winners) await db.ref('allWinners').push({ user: w.user, displayName: w.displayName, cardId: w.cardId, prize: share, isBot: w.isBot || false, time: Date.now() });
 
     await db.ref('game/announcement').set({ type: 'winner', winners, prize, share, time: Date.now() });
     await db.ref('game/paid').set(true);
@@ -518,42 +405,28 @@ async function announceWinner() {
 
     const confSnap = await db.ref('game/confirmedNumbers').get();
     const playerCount = new Set(Object.values(confSnap.val() || {})).size;
-    const totalSnap = await db.ref('game/total').get();
-    const anCollSnap = await db.ref('analytics/totalCollected').get();
-    const anPaidSnap = await db.ref('analytics/totalPaidOut').get();
-    await db.ref('analytics/totalCollected').set((anCollSnap.val() || 0) + (totalSnap.val() || 0));
-    await db.ref('analytics/totalPaidOut').set((anPaidSnap.val() || 0) + prize);
+    const total = (await db.ref('game/total').get()).val() || 0;
+    await db.ref('analytics/totalCollected').set(((await db.ref('analytics/totalCollected').get()).val() || 0) + total);
+    await db.ref('analytics/totalPaidOut').set(((await db.ref('analytics/totalPaidOut').get()).val() || 0) + prize);
     const prevAvg = (await db.ref('analytics/avgPlayers').get()).val() || 0;
     await db.ref('analytics/avgPlayers').set(((prevAvg * (roundNumber - 1)) + playerCount) / roundNumber);
-    const dailyProfitSnap = await db.ref('analytics/dailyProfit').get();
-    await db.ref('analytics/dailyProfit').set((dailyProfitSnap.val() || 0) + botWinShare);
+    await db.ref('analytics/dailyProfit').set(((await db.ref('analytics/dailyProfit').get()).val() || 0) + botWinShare);
     await db.ref('analytics/dailyRound').set(roundNumber);
-
-    console.log(`✅ Paid! Share: ${share} ብር to ${winners.length} winner(s)`);
-  } catch (e) {
-    console.error('❌ announceWinner error:', e.message);
-  }
+    console.log(`✅ Paid! ${share} ብር to ${winners.length} winner(s)`);
+  } catch (e) { console.error('❌ announceWinner error:', e.message); }
 }
 
-// ══ NEXT ROUND ══
 async function scheduleNextRound() {
   if (!autoModeOn) return;
   try {
-    const now = new Date();
-    const todayStr = now.toISOString().split('T')[0];
-    const lastResetSnap = await db.ref('analytics/lastResetDate').get();
-    const lastReset = lastResetSnap.val();
+    const todayStr = new Date().toISOString().split('T')[0];
+    const lastReset = (await db.ref('analytics/lastResetDate').get()).val();
 
     if (lastReset !== todayStr) {
-      const prevRoundSnap = await db.ref('analytics/dailyRound').get();
-      const prevProfitSnap = await db.ref('analytics/dailyProfit').get();
-      const prevRound = prevRoundSnap.val() || 0;
-      const prevProfit = prevProfitSnap.val() || 0;
-      if (prevRound > 0 && lastReset) {
-        await db.ref('analytics/history/' + lastReset).set({
-          date: lastReset, rounds: prevRound, profit: prevProfit
-        });
-      }
+      const prevRound = (await db.ref('analytics/dailyRound').get()).val() || 0;
+      const prevProfit = (await db.ref('analytics/dailyProfit').get()).val() || 0;
+      if (prevRound > 0 && lastReset)
+        await db.ref('analytics/history/' + lastReset).set({ date: lastReset, rounds: prevRound, profit: prevProfit });
       await db.ref('analytics/dailyRound').set(0);
       await db.ref('analytics/dailyProfit').set(0);
       await db.ref('analytics/lastResetDate').set(todayStr);
@@ -561,21 +434,14 @@ async function scheduleNextRound() {
       await db.ref('autoMode/round').set(roundNumber);
       console.log('🔄 Daily Reset:', todayStr);
 
-      const fiveDaysAgo = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-      const histSnap = await db.ref('analytics/history').get();
-      const histData = histSnap.val() || {};
-      for (let date in histData) {
-        if (date < fiveDaysAgo) await db.ref('analytics/history/' + date).remove();
-      }
-      const fiveDaysAgoMs = Date.now() - 5 * 24 * 60 * 60 * 1000;
-      const awSnap = await db.ref('allWinners').get();
-      const awData = awSnap.val() || {};
-      for (let key in awData) {
-        if ((awData[key].time || 0) < fiveDaysAgoMs) await db.ref('allWinners/' + key).remove();
-      }
+      const fiveDaysAgo = new Date(Date.now() - 5*24*60*60*1000).toISOString().split('T')[0];
+      const histData = (await db.ref('analytics/history').get()).val() || {};
+      for (let date in histData) if (date < fiveDaysAgo) await db.ref('analytics/history/' + date).remove();
+      const fiveMs = Date.now() - 5*24*60*60*1000;
+      const awData = (await db.ref('allWinners').get()).val() || {};
+      for (let key in awData) if ((awData[key].time || 0) < fiveMs) await db.ref('allWinners/' + key).remove();
     }
 
-    await db.ref('autoMode/round').set(roundNumber);
     roundNumber++;
     await db.ref('autoMode/round').set(roundNumber);
     console.log(`🔄 Round ${roundNumber}`);
@@ -591,15 +457,12 @@ async function scheduleNextRound() {
     await db.ref('game/total').set(0);
     calledNumbers = [];
 
-    const usersSnap = await db.ref('users').get();
-    const usersData = usersSnap.val() || {};
-    for (let uid in usersData) {
-      if (usersData[uid] && usersData[uid].is_bot) await db.ref('users/' + uid).remove();
-    }
+    const usersData = (await db.ref('users').get()).val() || {};
+    for (let uid in usersData)
+      if (usersData[uid]?.is_bot) await db.ref('users/' + uid).remove();
 
     await db.ref('autoMode/phase').set('countdown');
     setTimeout(async () => { if (!autoModeOn) return; await startAutoCountdown(); }, 3000);
-
   } catch (e) {
     console.error('❌ scheduleNextRound error:', e.message);
     setTimeout(() => { if (autoModeOn) startAutoCountdown(); }, 15000);
