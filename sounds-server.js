@@ -43,15 +43,15 @@ function getBingoLetter(n) {
 // ══ TTS CACHE ══
 const ttsCache = {};
 
-// ══ edge-tts — ወንድ አማርኛ ድምፅ ══
+// ══ gTTS — Python ══
 function fetchTTS(text) {
   return new Promise((resolve, reject) => {
     const filename = `/tmp/tts_${Date.now()}.mp3`;
     try {
-      const safeText = text.replace(/"/g, '\\"');
-      // am-ET-AmehaNeural — ወንድ አማርኛ ድምፅ
+      // Text ውስጥ single quote ካለ escape ያድርግ
+      const safeText = text.replace(/'/g, "\\'");
       execSync(
-        `edge-tts --voice am-ET-AmehaNeural --rate="-10%" --text "${safeText}" --write-media ${filename}`,
+        `python3 -c "from gtts import gTTS; gTTS('${safeText}', lang='am').save('${filename}')"`,
         { timeout: 10000 }
       );
       const buffer = fs.readFileSync(filename);
@@ -59,7 +59,7 @@ function fetchTTS(text) {
       resolve({ buffer, type: 'audio/mpeg' });
     } catch (e) {
       try { fs.unlinkSync(filename); } catch(err) {}
-      reject(new Error('edge-tts failed: ' + e.message));
+      reject(new Error('gTTS failed: ' + e.message));
     }
   });
 }
