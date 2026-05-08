@@ -226,9 +226,9 @@ async function botEngineTick() {
     const realRatePerSec = realPlayers / elapsedSecs;
 
     // Project total real players by end of countdown
-    const projectedRealTotal = Math.min(99, Math.round(realRatePerSec * totalSecs));
+    const projectedRealTotal = Math.min(100, Math.round(realRatePerSec * totalSecs));
 
-    // Bots needed = 100 - projected real (minimum 1 to always ensure 100)
+    // Bots needed = 100 - projected real (always ensure 100)
     const projectedBotsNeeded = Math.max(botsNeeded, 100 - projectedRealTotal);
 
     // Time window: finish bots 5s before countdown ends
@@ -241,13 +241,26 @@ async function botEngineTick() {
     let gapMs = 1000 / requiredRate;
 
     // ══ HUMAN-LIKE BEHAVIOR ══
-    // Phase 1: First 20% of time → bots come in slowly (×1.5 gap)
-    // Phase 2: Middle 60% of time → normal speed
-    // Phase 3: Last 20% of time → faster (×0.6 gap) to ensure 100
+    // Phase timing በ countdown ደቂቃ ይወሰናል
     const progress = elapsedSecs / totalSecs;
-    if (progress < 0.20) {
+    let slowPhase, fastPhase;
+    if (currentCdMinutes <= 1) {
+      // 1 ደቂቃ → slow start አጭር፣ fast finish ቀድሞ ይጀምራል
+      slowPhase = 0.05;
+      fastPhase = 0.70;
+    } else if (currentCdMinutes <= 2) {
+      // 2 ደቂቃ → medium
+      slowPhase = 0.10;
+      fastPhase = 0.75;
+    } else {
+      // 3+ ደቂቃ → normal human-like
+      slowPhase = 0.20;
+      fastPhase = 0.80;
+    }
+
+    if (progress < slowPhase) {
       gapMs = gapMs * 1.5; // slow start
-    } else if (progress > 0.80) {
+    } else if (progress > fastPhase) {
       gapMs = gapMs * 0.6; // fast finish
     }
 
