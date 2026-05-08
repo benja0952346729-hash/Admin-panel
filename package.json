@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
+    "build": "pip3 install edge-tts",
     "start": "concurrently \"node server.js\" \"PORT=3001 node sounds-server.js\""
   },
   "dependencies": {
