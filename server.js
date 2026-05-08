@@ -3,7 +3,8 @@ const express = require('express');
 const cors = require('cors');
 const app = express();
 const path = require('path');
-const https = require('https');
+const EdgeTTS = require('edge-tts-node');
+const fs = require('fs');
 
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 admin.initializeApp({
@@ -17,6 +18,7 @@ app.use(express.static(__dirname));
 app.use(express.json());
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
+
 // ══ TTS ENDPOINTS ══
 const AMHARIC_NUMBERS = {
   1:'አንድ',2:'ሁለት',3:'ሶስት',4:'አራት',5:'አምስት',
@@ -35,55 +37,71 @@ const AMHARIC_NUMBERS = {
   66:'ስልሳ ስድስት',67:'ስልሳ ሰባት',68:'ስልሳ ስምንት',69:'ስልሳ ዘጠኝ',70:'ሰባ',
   71:'ሰባ አንድ',72:'ሰባ ሁለት',73:'ሰባ ሶስት',74:'ሰባ አራት',75:'ሰባ አምስት'
 };
+
 function getBingoLetter(n){
   if(n<=15)return'ቢ';if(n<=30)return'አይ';if(n<=45)return'ኤን';if(n<=60)return'ጂ';return'ኦ';
 }
+
 const ttsCache = {};
-function fetchTTS(text){
-  return new Promise((resolve,reject)=>{
-    const options={
-      hostname:'translate.google.com',
-      path:`/translate_tts?ie=UTF-8&q=${encodeURIComponent(text)}&tl=am&client=tw-ob`,
-      method:'GET',
-      headers:{'User-Agent':'Mozilla/5.0','Referer':'https://translate.google.com/'}
-    };
-    const req=https.request(options,(res)=>{
-      if(res.statusCode===301||res.statusCode===302){
-        const u=new URL(res.headers.location);
-        const r2=https.request({hostname:u.hostname,path:u.pathname+u.search,method:'GET',headers:options.headers},(r)=>{
-          const c=[];r.on('data',d=>c.push(d));r.on('end',()=>resolve({buffer:Buffer.concat(c),type:r.headers['content-type']||'audio/mpeg'}));
-        });
-        r2.on('error',reject);r2.end();return;
-      }
-      const c=[];res.on('data',d=>c.push(d));res.on('end',()=>resolve({buffer:Buffer.concat(c),type:res.headers['content-type']||'audio/mpeg'}));
-    });
-    req.on('error',reject);
-    req.setTimeout(8000,()=>{req.destroy();reject(new Error('timeout'));});
-    req.end();
-  });
+
+// ══ edge-tts-node — ወንድ አማርኛ ድምፅ ══
+async function fetchTTS(text) {
+  const filename = `/tmp/tts_${Date.now()}_${Math.random().toString(36).slice(2)}.mp3`;
+  try {
+    const tts = new EdgeTTS();
+    await tts.setVoice('am-ET-AmehaNeural'); // ✅ ወንድ ድምፅ
+    await tts.toFile(text, filename);
+    const buffer = fs.readFileSync(filename);
+    try { fs.unlinkSync(filename); } catch(e) {}
+    return { buffer, type: 'audio/mpeg' };
+  } catch(e) {
+    try { fs.unlinkSync(filename); } catch(err) {}
+    throw new Error('edge-tts-node failed: ' + e.message);
+  }
 }
-app.get('/tts/number/:n',async(req,res)=>{
-  const n=parseInt(req.params.n);
-  if(!n||n<1||n>75)return res.status(400).end();
-  const key='num_'+n;
-  if(ttsCache[key]){res.set('Content-Type','audio/mpeg');res.set('Cache-Control','public,max-age=86400');return res.send(ttsCache[key]);}
-  try{
-    const text=`${getBingoLetter(n)}... ${AMHARIC_NUMBERS[n]}`;
-    const {buffer,type}=await fetchTTS(text);
-    ttsCache[key]=buffer;
-    res.set('Content-Type',type);res.set('Cache-Control','public,max-age=86400');res.send(buffer);
-  }catch(e){console.error('TTS error:',e.message);res.status(500).end();}
+
+app.get('/tts/number/:n', async (req, res) => {
+  const n = parseInt(req.params.n);
+  if(!n || n < 1 || n > 75) return res.status(400).end();
+  const key = 'num_' + n;
+  if(ttsCache[key]){
+    res.set('Content-Type', 'audio/mpeg');
+    res.set('Cache-Control', 'public, max-age=86400');
+    return res.send(ttsCache[key]);
+  }
+  try {
+    const text = `${getBingoLetter(n)}... ${AMHARIC_NUMBERS[n]}`;
+    const { buffer, type } = await fetchTTS(text);
+    ttsCache[key] = buffer;
+    res.set('Content-Type', type);
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.send(buffer);
+  } catch(e) {
+    console.error('TTS error:', e.message);
+    res.status(500).end();
+  }
 });
-app.get('/tts/winner',async(req,res)=>{
-  if(ttsCache['winner']){res.set('Content-Type','audio/mpeg');return res.send(ttsCache['winner']);}
-  try{
-    const {buffer,type}=await fetchTTS('ቢንጎ! አሸናፊ ተገኘ!');
-    ttsCache['winner']=buffer;
-    res.set('Content-Type',type);res.send(buffer);
-  }catch(e){console.error('TTS winner error:',e.message);res.status(500).end();}
+
+app.get('/tts/winner', async (req, res) => {
+  if(ttsCache['winner']){
+    res.set('Content-Type', 'audio/mpeg');
+    return res.send(ttsCache['winner']);
+  }
+  try {
+    const { buffer, type } = await fetchTTS('ቢንጎ! አሸናፊ ተገኘ!');
+    ttsCache['winner'] = buffer;
+    res.set('Content-Type', type);
+    res.send(buffer);
+  } catch(e) {
+    console.error('TTS winner error:', e.message);
+    res.status(500).end();
+  }
 });
-console.log('🔊 TTS endpoints ready!');
+
+console.log('🔊 TTS endpoints ready (am-ET-AmehaNeural - ወንድ ድምፅ)!');
+
 // ══ CLOUDINARY SOUNDS ══
+const https = require('https');
 const CLOUDINARY_CLOUD = 'diado1bxi';
 const CLOUDINARY_API_KEY = '117446111831141';
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_SECRET || 'biCrRU-O4tFt_icW8ONKE5POXJk';
@@ -109,7 +127,6 @@ async function loadCloudinarySounds() {
           const resources = json.resources || [];
           resources.forEach(r => {
             const publicId = r.public_id;
-            // suffix አስወግድ: "B1_lecny2" → "B1", "B1-2_xxx" → "B1"
             const match = publicId.match(/^([A-Z]+\d+)/);
             const key = match ? match[1] : publicId;
             soundsMap[key] = r.secure_url;
@@ -131,12 +148,10 @@ async function loadCloudinarySounds() {
   });
 }
 
-// Client sounds map endpoint
 app.get('/sounds-map', (req, res) => {
   res.json(soundsMap);
 });
 
-// Startup ላይ sounds load አድርግ
 loadCloudinarySounds();
 
 // ══ CONFIRM CARD ══
