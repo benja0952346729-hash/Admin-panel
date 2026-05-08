@@ -1,8 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const https = require('https');
-const { execSync } = require('child_process');
 const fs = require('fs');
+const EdgeTTS = require('edge-tts-node');
 
 const app = express();
 app.use(cors());
@@ -43,30 +43,26 @@ function getBingoLetter(n) {
 // ══ TTS CACHE ══
 const ttsCache = {};
 
-// ══ gTTS — Python ══
+// ══ edge-tts-node — ወንድ አማርኛ ድምፅ ══
 function fetchTTS(text) {
-  return new Promise((resolve, reject) => {
+  return new Promise(async (resolve, reject) => {
     const filename = `/tmp/tts_${Date.now()}.mp3`;
     try {
-      // Text ውስጥ single quote ካለ escape ያድርግ
-      const safeText = text.replace(/'/g, "\\'");
-      execSync(
-        `python3 -c "from gtts import gTTS; gTTS('${safeText}', lang='am').save('${filename}')"`,
-        { timeout: 10000 }
-      );
+      const tts = new EdgeTTS();
+      await tts.setVoice('am-ET-AmehaNeural');
+      await tts.toFile(text, filename);
       const buffer = fs.readFileSync(filename);
       try { fs.unlinkSync(filename); } catch(e) {}
       resolve({ buffer, type: 'audio/mpeg' });
-    } catch (e) {
+    } catch(e) {
       try { fs.unlinkSync(filename); } catch(err) {}
-      reject(new Error('gTTS failed: ' + e.message));
+      reject(new Error('edge-tts-node failed: ' + e.message));
     }
   });
 }
 
 // ══ TTS ENDPOINTS ══
 
-// /tts/number/:n — ቁጥር ማስታወቂያ
 app.get('/tts/number/:n', async (req, res) => {
   const n = parseInt(req.params.n);
   if (!n || n < 1 || n > 75) {
@@ -75,7 +71,6 @@ app.get('/tts/number/:n', async (req, res) => {
 
   const key = 'num_' + n;
 
-  // Cache ካለ ቀጥታ ላክ
   if (ttsCache[key]) {
     res.set('Content-Type', 'audio/mpeg');
     res.set('Cache-Control', 'public, max-age=86400');
@@ -86,10 +81,8 @@ app.get('/tts/number/:n', async (req, res) => {
     const letter = getBingoLetter(n);
     const numWord = AMHARIC_NUMBERS[n];
     const text = `${letter}... ${numWord}`;
-
     const { buffer, type } = await fetchTTS(text);
     ttsCache[key] = buffer;
-
     res.set('Content-Type', type);
     res.set('Cache-Control', 'public, max-age=86400');
     res.send(buffer);
@@ -99,7 +92,6 @@ app.get('/tts/number/:n', async (req, res) => {
   }
 });
 
-// /tts/winner — አሸናፊ ማስታወቂያ
 app.get('/tts/winner', async (req, res) => {
   if (ttsCache['winner']) {
     res.set('Content-Type', 'audio/mpeg');
@@ -110,7 +102,6 @@ app.get('/tts/winner', async (req, res) => {
   try {
     const { buffer, type } = await fetchTTS('ቢንጎ! አሸናፊ ተገኘ!');
     ttsCache['winner'] = buffer;
-
     res.set('Content-Type', type);
     res.set('Cache-Control', 'public, max-age=86400');
     res.send(buffer);
@@ -120,13 +111,11 @@ app.get('/tts/winner', async (req, res) => {
   }
 });
 
-// /tts/warmup — Server ሲጀምር ሁሉም ቁጥሮች pre-cache ያድርግ
 app.get('/tts/warmup', async (req, res) => {
   res.json({ ok: true, message: 'Warmup started in background' });
 
-  // Background ውስጥ ሁሉም 1-75 pre-generate
   (async () => {
-    console.log('🔄 TTS Warmup starting...');
+    console.log('TTS Warmup starting...');
     for (let n = 1; n <= 75; n++) {
       const key = 'num_' + n;
       if (ttsCache[key]) continue;
@@ -136,22 +125,20 @@ app.get('/tts/warmup', async (req, res) => {
         const text = `${letter}... ${numWord}`;
         const { buffer } = await fetchTTS(text);
         ttsCache[key] = buffer;
-        console.log(`✅ Cached: ${n} — ${text}`);
-        // ትንሽ ቆይ — gTTS rate limit ለማስቀረት
-        await new Promise(r => setTimeout(r, 300));
+        console.log(`Cached: ${n}`);
+        await new Promise(r => setTimeout(r, 200));
       } catch (e) {
-        console.error(`❌ Failed: ${n} — ${e.message}`);
+        console.error(`Failed: ${n} — ${e.message}`);
       }
     }
-    // Winner ድምፅ
     try {
       if (!ttsCache['winner']) {
         const { buffer } = await fetchTTS('ቢንጎ! አሸናፊ ተገኘ!');
         ttsCache['winner'] = buffer;
-        console.log('✅ Cached: winner');
+        console.log('Cached: winner');
       }
     } catch(e) {}
-    console.log('🎉 TTS Warmup complete!');
+    console.log('Warmup complete!');
   })();
 });
 
@@ -181,16 +168,16 @@ function loadCloudinarySounds() {
             const key = match ? match[1] : r.public_id;
             soundsMap[key] = r.secure_url;
           });
-          console.log(`✅ Loaded ${Object.keys(soundsMap).length} sounds from Cloudinary`);
+          console.log(`Loaded ${Object.keys(soundsMap).length} sounds from Cloudinary`);
         } catch (e) {
-          console.error('❌ Cloudinary parse error:', e.message);
+          console.error('Cloudinary parse error:', e.message);
         }
         resolve();
       });
     });
 
     req.on('error', (e) => {
-      console.error('❌ Cloudinary load error:', e.message);
+      console.error('Cloudinary load error:', e.message);
       resolve();
     });
 
@@ -207,7 +194,6 @@ app.post('/sounds-reload', async (req, res) => {
   res.json({ ok: true, count: Object.keys(soundsMap).length });
 });
 
-// ══ HEALTH CHECK ══
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
@@ -222,12 +208,6 @@ const PORT = process.env.PORT || 3001;
 
 loadCloudinarySounds().then(() => {
   app.listen(PORT, () => {
-    console.log(`🔊 Server running on port ${PORT}`);
-    console.log(`   /tts/number/:n  — Amharic TTS (gTTS)`);
-    console.log(`   /tts/winner     — Winner announcement`);
-    console.log(`   /tts/warmup     — Pre-cache all numbers`);
-    console.log(`   /sounds-map     — Cloudinary sounds`);
-    console.log(`   /sounds-reload  — Reload from Cloudinary`);
-    console.log(`   /health         — Status check`);
+    console.log(`Server running on port ${PORT}`);
   });
 });
