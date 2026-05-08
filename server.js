@@ -90,8 +90,8 @@ app.post('/confirm-card', async (req, res) => {
     // set() ፈንታ transaction() ስለምንጠቀም 2 requests በተመሳሳይ ቢመጡ safe ነው
     let balanceOk = false;
     await db.ref('users/' + userId + '/balance').transaction(current => {
-      const bal = current || 0;
-      if (bal < bet) return; // abort — balance አንስተኛ
+      const bal = current ?? 0; // ✅ null/undefined → 0 (|| ሳይሆን ??)
+      if (bet > 0 && bal < bet) return; // abort — balance አንስተኛ
       balanceOk = true;
       return bal - bet;
     });
