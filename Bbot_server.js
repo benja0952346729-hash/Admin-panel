@@ -10,7 +10,6 @@ if(!admin.apps.length){
 }
 const db = admin.database();
 
-// Helper wrappers to match firebase client API style
 function ref(db, path){ return db.ref(path); }
 async function set(refObj, val){ return refObj.set(val); }
 async function get(refObj){ 
@@ -24,7 +23,6 @@ function onValue(refObj, cb){
 
 // ══ NAME SYSTEM (300 TOTAL) ══
 
-// 200 Ethiopian Names (Latin)
 const ethNames = [
   "Abebe","Kebede","Tadesse","Girma","Haile","Bekele","Tesfaye","Alemu","Demeke","Mulugeta",
   "Dawit","Yonas","Eyob","Nahom","Elias","Henok","Binyam","Samson","Yohannes","Amanuel",
@@ -48,7 +46,6 @@ const ethNames = [
   "Muluneh","Aklilu","Fantahun","Endale","Belay","Meaza","Tigabu","Yalew","Zemen","Kebrom"
 ];
 
-// 50 Amharic Names (Amharic script)
 const amNames = [
   "አበበ","ከበደ","ሰላም","ሚካኤል","ማርታ","ሄለን","ዮናስ","ሶፊያ","ናርዶስ","ሃና",
   "ልዩ","አስቴር","ቤቴል","ሜሮን","ሰብለ","ፍቅር","ሩት","ሃይማኖት","ዘካሪያስ","ታደሰ",
@@ -57,7 +54,6 @@ const amNames = [
   "ሙሉቀን","ወርቅነሽ","አሸናፊ","ዮሴፍ","ሃይካል","ቢኒያም","ሰሎሞን","ዮሐንስ","ጌታቸው","ያሬድ"
 ];
 
-// 50 Telegram Usernames
 const tgNames = [
   "king.abel","ethio.star","bingo.master","lucky777","fastwin",
   "darkpro","alphauser","betagamer","proplay","luckyeth",
@@ -71,7 +67,6 @@ const tgNames = [
   "wolfking","ninjapro","shadowwin","turboeth","blazepro"
 ];
 
-// 67% eth latin, 17% amharic, 16% telegram
 function getRandomName(){
   const r = Math.random();
   if(r < 0.67) return ethNames[Math.floor(Math.random()*ethNames.length)];
@@ -84,20 +79,9 @@ let smartBotEnabled = false;
 let botEngineRunning = false;
 let botEngineTimer = null;
 let lastBotAddedTime = 0;
-let nextBotDelay = 6000;
 let currentCdMinutes = 3;
 let countdownStartAt = null;
-let realPlayerEntryTimes = []; // track when real players join
-
-// ══ HELPERS ══
-function shuffle(arr) {
-  const a = [...arr];
-  for (let i = a.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [a[i], a[j]] = [a[j], a[i]];
-  }
-  return a;
-}
+let realPlayerEntryTimes = [];
 
 function log(msg) {
   const now = new Date().toLocaleTimeString('en-ET');
@@ -119,16 +103,13 @@ onValue(ref(db, 'smartBot/enabled'), (snap) => {
 });
 
 // ══ LISTEN: game/countdown ══
-// Track countdown start for bot timing calculations
 onValue(ref(db, 'game/countdown'), (snap) => {
   const val = snap.val();
   if (val && val.active && val.startAt) {
     countdownStartAt = val.startAt;
     currentCdMinutes = val.cdMinutes || val.mins || 3;
-    realPlayerEntryTimes = []; // reset on new countdown
-    log(`Countdown detected: ${currentCdMinutes} min, starts at ${new Date(val.startAt).toLocaleTimeString()}`);
-
-    // If smart bot is enabled, make sure engine is running
+    realPlayerEntryTimes = [];
+    log(`Countdown detected: ${currentCdMinutes} min`);
     if (smartBotEnabled && !botEngineRunning) {
       startBotEngine();
     }
@@ -138,8 +119,7 @@ onValue(ref(db, 'game/countdown'), (snap) => {
   }
 });
 
-// ══ LISTEN: game/confirmedNumbers ══
-// Track real player join times for speed calculation
+// ══ LISTEN: real player joins ══
 let prevRealCount = 0;
 onValue(ref(db, 'game/confirmedNumbers'), async (snap) => {
   const data = snap.val() || {};
@@ -154,7 +134,6 @@ onValue(ref(db, 'game/confirmedNumbers'), async (snap) => {
     if (!botIds.has(String(uid))) realCount++;
   });
 
-  // New real player joined?
   if (realCount > prevRealCount) {
     const newJoins = realCount - prevRealCount;
     for (let i = 0; i < newJoins; i++) {
@@ -170,7 +149,7 @@ function startBotEngine() {
   if (botEngineRunning) return;
   botEngineRunning = true;
   lastBotAddedTime = 0;
-  log('Bot engine started — checking every 2 seconds');
+  log('Bot engine started');
   botEngineTimer = setInterval(botEngineTick, 1000);
 }
 
@@ -229,12 +208,12 @@ async function botEngineTick() {
       return;
     }
 
-    // Timing
+    // ══ TIMING ══
     const now = Date.now();
     const remainMs = Math.max(0, cdData.startAt - now);
     const remainSecs = remainMs / 1000;
     const totalSecs = (cdData.cdMinutes || cdData.mins || currentCdMinutes) * 60;
-    const elapsedSecs = totalSecs - remainSecs;
+    const elapsedSecs = Math.max(1, totalSecs - remainSecs);
 
     // 5s ይጠብቃል
     if (elapsedSecs < 5) {
@@ -242,44 +221,57 @@ async function botEngineTick() {
       return;
     }
 
-    // ══ PURE BALANCE CALCULATION ══
-    // Real player rate per second so far
-    const realRate = elapsedSecs > 0 ? realPlayers / elapsedSecs : 0;
+    // ══ REAL PLAYER SPEED CALCULATION ══
+    // Real players per second (current rate)
+    const realRatePerSec = realPlayers / elapsedSecs;
 
-    // Project how many real players will join by end
-    const projectedReal = Math.min(100, realRate * totalSecs);
+    // Project total real players by end of countdown
+    const projectedRealTotal = Math.min(99, Math.round(realRatePerSec * totalSecs));
 
-    // How many bots still needed considering projection
-    const projectedBotsNeeded = Math.max(1, Math.ceil(100 - projectedReal));
+    // Bots needed = 100 - projected real (minimum 1 to always ensure 100)
+    const projectedBotsNeeded = Math.max(botsNeeded, 100 - projectedRealTotal);
 
-    // Time window to finish: target finish at 5s remaining
+    // Time window: finish bots 5s before countdown ends
     const timeWindow = Math.max(1, remainSecs - 5);
 
-    // Required bot rate: bots per second
-    const requiredRate = botsNeeded / timeWindow;
+    // Required bot rate (bots per second)
+    const requiredRate = projectedBotsNeeded / timeWindow;
 
-    // Gap between bots in ms
+    // Base gap in ms
     let gapMs = 1000 / requiredRate;
 
-    // Over-pace: real players joining way too fast → pause bots
-    const expectedRealNow = realRate > 0 ? realRate * totalSecs : 0;
-    if (realPlayers > projectedBotsNeeded && realRate * totalSecs > 90 && realPlayers > 10) {
-      await set(ref(db, 'smartBot/status'), 'PAUSED_REAL_FAST');
-      log(`⏸ Real players filling fast (${realPlayers}) — pausing`);
-      return;
+    // ══ HUMAN-LIKE BEHAVIOR ══
+    // Phase 1: First 20% of time → bots come in slowly (×1.5 gap)
+    // Phase 2: Middle 60% of time → normal speed
+    // Phase 3: Last 20% of time → faster (×0.6 gap) to ensure 100
+    const progress = elapsedSecs / totalSecs;
+    if (progress < 0.20) {
+      gapMs = gapMs * 1.5; // slow start
+    } else if (progress > 0.80) {
+      gapMs = gapMs * 0.6; // fast finish
     }
 
-    // Human-like variation ±20%
-    const variation = gapMs * 0.20;
+    // Random ±15% variation
+    const variation = gapMs * 0.15;
     gapMs = gapMs + (Math.random() * variation * 2 - variation);
 
-    // Safety: min 250ms, max 10s
-    gapMs = Math.max(250, Math.min(10000, gapMs));
+    // Safety clamps
+    // Min 200ms (ensures we can add fast enough for 1-2 min games)
+    // Max 8s (not too slow)
+    gapMs = Math.max(200, Math.min(8000, gapMs));
 
-    await set(ref(db, 'smartBot/status'), `ACTIVE|${Math.round(remainSecs)}s|gap:${Math.round(gapMs)}ms`);
-    log(`📊 ${Math.round(remainSecs)}s | real:${realPlayers} | bots:${botsNeeded} | gap:${Math.round(gapMs)}ms`);
+    // Emergency mode: last 10 seconds and still bots needed → go max speed
+    if (remainSecs <= 10 && botsNeeded > 0) {
+      gapMs = 200;
+    }
 
-    // Add bot only if enough time has passed since last bot
+    await set(ref(db, 'smartBot/status'),
+      `ACTIVE|${Math.round(remainSecs)}s|real:${realPlayers}|projReal:${projectedRealTotal}|botsLeft:${botsNeeded}|gap:${Math.round(gapMs)}ms`
+    );
+
+    log(`📊 ${Math.round(remainSecs)}s remain | real:${realPlayers} | projReal:${projectedRealTotal} | botsLeft:${botsNeeded} | gap:${Math.round(gapMs)}ms`);
+
+    // Add bot only if enough time has passed
     if (now - lastBotAddedTime >= gapMs) {
       await addOneBot(confData, usersData, bet, pct, botsNeeded);
     }
@@ -289,9 +281,8 @@ async function botEngineTick() {
   }
 }
 
-// ══ ADD ONE BOT (with multi-card support) ══
+// ══ ADD ONE BOT ══
 async function addOneBot(confData, usersData, bet, pct, botsNeeded) {
-  // Available card slots
   const taken = new Set(Object.keys(confData).map(Number));
   const avail = [];
   for (let i = 1; i <= 100; i++) {
@@ -299,32 +290,25 @@ async function addOneBot(confData, usersData, bet, pct, botsNeeded) {
   }
   if (!avail.length) return;
 
-  // 10% chance → multi card (2-3 cards), 90% → 1 card
-  // Only take multi if enough cards available and enough bots needed
+  // 10% chance multi-card (2-3 cards)
   let cardCount = 1;
   if (botsNeeded >= 3 && avail.length >= 3 && Math.random() < 0.10) {
-    cardCount = Math.random() < 0.6 ? 2 : 3; // 60% chance 2 cards, 40% chance 3 cards
+    cardCount = Math.random() < 0.6 ? 2 : 3;
   }
 
-  // Pick unused name & ID — one bot, multiple cards
   const botName = getRandomName();
   const fakeBotId = String(7000000000 + Math.floor(Math.random() * 999999999));
-
-  // Shuffle avail and pick cardCount slots
   const shuffled = avail.sort(() => Math.random() - 0.5);
   const selectedCards = shuffled.slice(0, cardCount);
 
-  // Write user once
   await set(ref(db, `users/${fakeBotId}/display`), botName);
   await set(ref(db, `users/${fakeBotId}/is_bot`), true);
   await set(ref(db, `users/${fakeBotId}/balance`), 0);
 
-  // Write each card
   for (const cardId of selectedCards) {
     await set(ref(db, `game/confirmedNumbers/${cardId}`), fakeBotId);
   }
 
-  // Update prize pool
   const newSnap = await get(ref(db, 'game/confirmedNumbers'));
   const newTotal = Object.keys(newSnap.val() || {}).length;
   if (bet > 0) {
@@ -334,7 +318,6 @@ async function addOneBot(confData, usersData, bet, pct, botsNeeded) {
 
   lastBotAddedTime = Date.now();
 
-  // Log to Firebase for admin UI
   await set(ref(db, 'smartBot/lastAdded'), {
     name: botName,
     cardId: selectedCards.join(','),
@@ -343,9 +326,8 @@ async function addOneBot(confData, usersData, bet, pct, botsNeeded) {
     remaining: botsNeeded - cardCount
   });
 
-  log(`✅ Bot added: ${botName} → Card #${selectedCards.join(',')} | ${botsNeeded - cardCount} remaining`);
+  log(`✅ Bot: ${botName} → Card #${selectedCards.join(',')} | ${botsNeeded - cardCount} remaining`);
 }
 
-// ══ KEEP ALIVE — no HTTP server (port conflict fix) ══
-log('🚀 Smart Bot Server running — no HTTP port needed');
+log('🚀 Smart Bot Server running');
 log('Listening for smartBot/enabled changes...');
