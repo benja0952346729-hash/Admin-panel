@@ -3,11 +3,12 @@
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
-    "start": "PORT=3000 node server.js & PORT=3001 node sounds-server.js"
+    "start": "concurrently \"PORT=3000 node server.js\" \"PORT=3001 node sounds-server.js\""
   },
   "dependencies": {
     "express": "^4.18.2",
     "firebase-admin": "^11.11.0",
-    "cors": "^2.8.5"
+    "cors": "^2.8.5",
+    "concurrently": "^8.2.0"
   }
 }
