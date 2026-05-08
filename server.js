@@ -147,6 +147,33 @@ function checkWin(board, called) {
   return false;
 }
 
+// ══ COLUMN CLOSE CHECK ══
+// Board layout: columns are B(0,5,10,15,20), I(1,6,11,16,21), N(2,7,12,17,22), G(3,8,13,18,23), O(4,9,14,19,24)
+// Returns true if calling number `n` would complete or nearly-complete (4/5) a column on ANY board
+function wouldCloseColumnSoon(n, allBoards, called) {
+  const colIndices = [
+    [0, 5, 10, 15, 20],
+    [1, 6, 11, 16, 21],
+    [2, 7, 12, 17, 22],
+    [3, 8, 13, 18, 23],
+    [4, 9, 14, 19, 24],
+  ];
+
+  const simulatedCalled = [...called, n];
+
+  for (let cardId in allBoards) {
+    const board = allBoards[cardId];
+    for (let col of colIndices) {
+      const cells = col.map(i => board[i]);
+      const matched = cells.filter(c => c === 'FREE' || simulatedCalled.includes(c)).length;
+      // If this number would make 5/5 column (win) — allow it (true winner ሁሌም ያሸንፋል)
+      // If it would make 4/5 — avoid it to slow game
+      if (matched === 4) return true;
+    }
+  }
+  return false;
+}
+
 function clearAllTimers() {
   clearInterval(callTimer); callTimer = null;
   clearInterval(countdownTimer); countdownTimer = null;
@@ -268,18 +295,45 @@ async function autoCallNumber(speed) {
         return;
       }
 
+      // ══ SMART NUMBER SELECTION ══
+      // Step 1: Target card ቁጥሮች (65% bias) — እንዳለ ይቀራል
       const neededRemaining = remaining.filter(n => neededNums.includes(n) && !calledNumbers.includes(n));
-      const n = (neededRemaining.length > 0 && Math.random() < 0.65)
-        ? neededRemaining[Math.floor(Math.random() * neededRemaining.length)]
-        : remaining[Math.floor(Math.random() * remaining.length)];
+
+      // Step 2: Column ቶሎ እንዳይዘጋ — 4/5 column ሊዘጋ የሚችሉ ቁጥሮች ያስቀር
+      // ግን ሁሉም remaining ቁጥሮች column ይዘጋሉ ከሆነ — ጨዋታ እንዳይቆም ያስቀር
+      let safeRemaining = remaining.filter(n => !wouldCloseColumnSoon(n, allBoards, calledNumbers));
+
+      // ሁሉም ቁጥሮች column ይዘጋሉ ከሆነ safe filter አናደርግም
+      if (safeRemaining.length === 0) {
+        safeRemaining = remaining;
+        console.log('⚠️ All remaining numbers close columns — skipping column filter');
+      }
+
+      // Step 3: neededRemaining ከ safeRemaining ጋር intersect
+      const safeNeeded = neededRemaining.filter(n => safeRemaining.includes(n));
+
+      let n;
+      const rand = Math.random();
+
+      if (safeNeeded.length > 0 && rand < 0.65) {
+        // Target card ቁጥር — column ደህና
+        n = safeNeeded[Math.floor(Math.random() * safeNeeded.length)];
+      } else if (safeRemaining.length > 0) {
+        // Safe random ቁጥር
+        n = safeRemaining[Math.floor(Math.random() * safeRemaining.length)];
+      } else {
+        // Fallback — ሁሉም remaining
+        n = remaining[Math.floor(Math.random() * remaining.length)];
+      }
 
       calledNumbers.push(n);
       await db.ref('game/calledNumbers').push(n);
-      console.log(`📢 ${getLetter(n)}${n}`);
+      console.log(`📢 ${getLetter(n)}${n} (called: ${calledNumbers.length})`);
 
       const prize = Math.floor(((await db.ref('game/total').get()).val() || 0) * (((await db.ref('game/percent').get()).val() || 80) / 100));
       await db.ref('game/prize').set(prize);
 
+      // ══ TRUE WINNER CHECK — ሁሌም ያሸንፋል ══
       const winners = [];
       for (let cardId in allBoards) {
         if (checkWin(allBoards[cardId], calledNumbers))
@@ -288,6 +342,7 @@ async function autoCallNumber(speed) {
 
       if (winners.length > 0) {
         clearInterval(callTimer);
+        console.log(`🏆 Winner found after ${calledNumbers.length} calls!`);
         await db.ref('game/pendingWinner').set({ winners, prize, announced: false, time: Date.now() });
         startAutoAnnounce();
       }
