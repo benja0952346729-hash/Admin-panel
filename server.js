@@ -4,8 +4,6 @@ const cors = require('cors');
 const app = express();
 const path = require('path');
 const https = require('https');
-const { MsEdgeTTS, OUTPUT_FORMAT } = require('msedge-tts'); // ✅ ወንድ ድምፅ
-const fs = require('fs');
 
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 admin.initializeApp({
@@ -19,71 +17,6 @@ app.use(express.static(__dirname));
 app.use(express.json());
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
-
-// ══ TTS ENDPOINTS ══
-const AMHARIC_NUMBERS = {
-  1:'አንድ',2:'ሁለት',3:'ሶስት',4:'አራት',5:'አምስት',
-  6:'ስድስት',7:'ሰባት',8:'ስምንት',9:'ዘጠኝ',10:'አስር',
-  11:'አስራ አንድ',12:'አስራ ሁለት',13:'አስራ ሶስት',14:'አስራ አራት',15:'አስራ አምስት',
-  16:'አስራ ስድስት',17:'አስራ ሰባት',18:'አስራ ስምንት',19:'አስራ ዘጠኝ',20:'ሃያ',
-  21:'ሃያ አንድ',22:'ሃያ ሁለት',23:'ሃያ ሶስት',24:'ሃያ አራት',25:'ሃያ አምስት',
-  26:'ሃያ ስድስት',27:'ሃያ ሰባት',28:'ሃያ ስምንት',29:'ሃያ ዘጠኝ',30:'ሰላሳ',
-  31:'ሰላሳ አንድ',32:'ሰላሳ ሁለት',33:'ሰላሳ ሶስት',34:'ሰላሳ አራት',35:'ሰላሳ አምስት',
-  36:'ሰላሳ ስድስት',37:'ሰላሳ ሰባት',38:'ሰላሳ ስምንት',39:'ሰላሳ ዘጠኝ',40:'አርባ',
-  41:'አርባ አንድ',42:'አርባ ሁለት',43:'አርባ ሶስት',44:'አርባ አራት',45:'አርባ አምስት',
-  46:'አርባ ስድስት',47:'አርባ ሰባት',48:'አርባ ስምንት',49:'አርባ ዘጠኝ',50:'ሃምሳ',
-  51:'ሃምሳ አንድ',52:'ሃምሳ ሁለት',53:'ሃምሳ ሶስት',54:'ሃምሳ አራት',55:'ሃምሳ አምስት',
-  56:'ሃምሳ ስድስት',57:'ሃምሳ ሰባት',58:'ሃምሳ ስምንት',59:'ሃምሳ ዘጠኝ',60:'ስልሳ',
-  61:'ስልሳ አንድ',62:'ስልሳ ሁለት',63:'ስልሳ ሶስት',64:'ስልሳ አራት',65:'ስልሳ አምስት',
-  66:'ስልሳ ስድስት',67:'ስልሳ ሰባት',68:'ስልሳ ስምንት',69:'ስልሳ ዘጠኝ',70:'ሰባ',
-  71:'ሰባ አንድ',72:'ሰባ ሁለት',73:'ሰባ ሶስት',74:'ሰባ አራት',75:'ሰባ አምስት'
-};
-
-function getBingoLetter(n){
-  if(n<=15)return'ቢ';if(n<=30)return'አይ';if(n<=45)return'ኤን';if(n<=60)return'ጂ';return'ኦ';
-}
-
-const ttsCache = {};
-
-// ══ msedge-tts — ወንድ አማርኛ ድምፅ ✅ ══
-async function fetchTTS(text) {
-  const tts = new MsEdgeTTS();
-  await tts.setMetadata(
-    'am-ET-AmehaNeural',
-    OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3
-  );
-  return new Promise((resolve, reject) => {
-    const { audioStream } = tts.toStream(text);
-    const chunks = [];
-    audioStream.on('data', chunk => chunks.push(chunk));
-    audioStream.on('end', () => resolve({ buffer: Buffer.concat(chunks), type: 'audio/mpeg' }));
-    audioStream.on('error', reject);
-  });
-}
-
-app.get('/tts/number/:n',async(req,res)=>{
-  const n=parseInt(req.params.n);
-  if(!n||n<1||n>75)return res.status(400).end();
-  const key='num_'+n;
-  if(ttsCache[key]){res.set('Content-Type','audio/mpeg');res.set('Cache-Control','public,max-age=86400');return res.send(ttsCache[key]);}
-  try{
-    const text=`${getBingoLetter(n)}... ${AMHARIC_NUMBERS[n]}`;
-    const {buffer}=await fetchTTS(text);
-    ttsCache[key]=buffer;
-    res.set('Content-Type','audio/mpeg');res.set('Cache-Control','public,max-age=86400');res.send(buffer);
-  }catch(e){console.error('TTS error:',e.message);res.status(500).end();}
-});
-
-app.get('/tts/winner',async(req,res)=>{
-  if(ttsCache['winner']){res.set('Content-Type','audio/mpeg');return res.send(ttsCache['winner']);}
-  try{
-    const {buffer}=await fetchTTS('ቢንጎ! አሸናፊ ተገኘ!');
-    ttsCache['winner']=buffer;
-    res.set('Content-Type','audio/mpeg');res.send(buffer);
-  }catch(e){console.error('TTS winner error:',e.message);res.status(500).end();}
-});
-
-console.log('🔊 TTS endpoints ready (am-ET-AmehaNeural ወንድ ድምፅ)!');
 
 // ══ CLOUDINARY SOUNDS ══
 const CLOUDINARY_CLOUD = 'diado1bxi';
@@ -467,4 +400,4 @@ async function scheduleNextRound() {
     console.error('❌ scheduleNextRound error:', e.message);
     setTimeout(() => { if (autoModeOn) startAutoCountdown(); }, 15000);
   }
-        }
+}
