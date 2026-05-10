@@ -185,47 +185,43 @@ function getGMT3DecimalHour() {
 }
 
 // ══ FEATURE 1: TIME-OF-DAY SPEED MULTIPLIER ══
-// Ethiopian time based:
-// 🌙 ጠዋት  12:00 ሌሊት → 4:50 ጥዋት : × 4.0 → × 2.0 → × 1.0 (እየቀነሰ)
-//          መሃል = 2:25 ጥዋት         : × 2.0
-// 🚀 Peak  4:50 ጥዋት  → 4:45 ማታ  : × 1.0 (Max speed)
-// 🌆 ማታ   4:45 ማታ   → 6:30 ማታ  : × 1.0 → × 2.0 → × 4.0 (እየጨመረ)
-//          መሃል = 5:37 ማታ          : × 2.0
-// ☠️ Dead  6:30 ማታ+              : bot አይግባ
+// Ethiopian time based
+// ጠዋት 12:00 - 4:50 → slow እያጠነሰ (multiplier ↓)
+// ቀን 4:50 - 10:45 → max speed (multiplier = 1.0)
+// ማታ 10:45 - 12:30 → slow እየሄደ (multiplier ↑)
+// 12:30+ → dead (bot አይግባ)
 
 function getTimeMultiplier() {
-  const ethHour = getEthiopianHour();
+  const ethHour = getEthiopianHour(); // 0-23 decimal
 
-  // Ethiopian hour reference:
-  // 0.0   = 12:00 ሌሊት
-  // 2.417 = 2:25  ጥዋት  (morning mid → × 2.0)
-  // 4.833 = 4:50  ጥዋት  (peak start  → × 1.0)
-  // 16.75 = 4:45  ማታ   (peak end    → × 1.0)
-  // 17.617= 5:37  ማታ   (evening mid → × 2.0)
-  // 18.5  = 6:30  ማታ   (dead start  → × 4.0)
+  // Ethiopian clock:
+  // 12:00 midnight eth = 0.0
+  // 4:50 morning eth  = 4.833
+  // 10:45 day eth     = 10.75
+  // 12:30 night eth   = 12.5
 
-  // ☠️ DEAD ZONE: 6:30 ማታ+
-  if (ethHour >= 18.5) {
-    return null; // bot አይግባ
+  // ☠️ DEAD ZONE: 12:30 ማታ → 12:00 ሌሊት (12.5 to 24/0)
+  if (ethHour >= 12.5 || ethHour < 0) {
+    return null; // dead - bot አይግባ
   }
 
-  // 🌙 SLOW MORNING: 12:00 ሌሊት → 4:50 ጥዋት
-  // × 4.0 (12:00) → × 2.0 (2:25) → × 1.0 (4:50)
+  // 🌙 SLOW MORNING: 12:00 ሌሊት → 4:50 ጥዋት (0 to 4.833)
+  // multiplier: 3.0 (12:00) → 1.0 (4:50) - linearly decreasing
   if (ethHour < 4.833) {
-    const progress = ethHour / 4.833; // 0 → 1
-    const multiplier = 4.0 - (progress * 3.0); // 4.0 → 1.0
+    const progress = ethHour / 4.833; // 0 to 1
+    const multiplier = 3.0 - (progress * 2.0); // 3.0 → 1.0
     return multiplier;
   }
 
-  // 🚀 PEAK ZONE: 4:50 ጥዋት → 4:45 ማታ
-  if (ethHour >= 4.833 && ethHour < 16.75) {
-    return 1.0; // max speed
+  // 🚀 PEAK ZONE: 4:50 ጥዋት → 10:45 ቀን (4.833 to 10.75)
+  if (ethHour >= 4.833 && ethHour < 10.75) {
+    return 1.0; // max speed - code ሳይቀይር
   }
 
-  // 🌆 SLOW EVENING: 4:45 ማታ → 6:30 ማታ
-  // × 1.0 (4:45) → × 2.0 (5:37) → × 4.0 (6:30)
-  if (ethHour >= 16.75 && ethHour < 18.5) {
-    const progress = (ethHour - 16.75) / (18.5 - 16.75); // 0 → 1
+  // 🌆 SLOW EVENING: 10:45 ቀን → 12:30 ማታ (10.75 to 12.5)
+  // multiplier: 1.0 (10:45) → 4.0 (12:30) - linearly increasing
+  if (ethHour >= 10.75 && ethHour < 12.5) {
+    const progress = (ethHour - 10.75) / (12.5 - 10.75); // 0 to 1
     const multiplier = 1.0 + (progress * 3.0); // 1.0 → 4.0
     return multiplier;
   }
@@ -450,20 +446,17 @@ async function botEngineTick() {
 
     const projectedBotsNeeded = Math.max(botsNeeded, 100 - projectedRealTotal);
 
-    // FEATURE 4: Bet-based adjustment (fixed thresholds)
-    // 30 በታች  → feature አይሰራም (× 1.0)
-    // 30 ብር   → Normal  (× 1.0)
-    // 40 ብር   → መካከለኛ (× 1.2 ቀስ - real players ሊመጡ ይችላሉ)
-    // 50+ ብር  → ብዙ    (× 1.5 ቀስ - real players ይጠብቅ)
+    // FEATURE 4: Bet-based adjustment
+    // ከፍተኛ bet → real players ሊጨምሩ ይችላሉ → bots ቆይ
     let betMultiplier = 1.0;
-    if (bet >= 50) {
-      betMultiplier = 1.5; // ብዙ → ቀስ
-    } else if (bet >= 40) {
-      betMultiplier = 1.2; // መካከለኛ → ትንሽ ቀስ
-    } else if (bet >= 30) {
-      betMultiplier = 1.0; // Normal → እንደነበረ
+    if (bet > 0) {
+      // Average bet ከ history ይሰላል
+      if (gameHistory.length > 5) {
+        const avgBet = gameHistory.reduce((s,g) => s + (g.bet||0), 0) / gameHistory.length;
+        if (bet > avgBet * 1.5) betMultiplier = 1.4; // ከፍ bet → ቀስ
+        else if (bet < avgBet * 0.5) betMultiplier = 0.8; // ዝቅ bet → ፈጥን
+      }
     }
-    // 30 በታች → betMultiplier = 1.0 (feature አይሰራም)
 
     const timeWindow = Math.max(1, remainSecs - 5);
     const requiredRate = projectedBotsNeeded / timeWindow;
