@@ -22,7 +22,6 @@ function onValue(refObj, cb){
 }
 
 // ══ NAME SYSTEM (300 TOTAL) ══
-
 const ethNames = [
   "Abebe","Kebede","Tadesse","Girma","Haile","Bekele","Tesfaye","Alemu","Demeke","Mulugeta",
   "Dawit","Yonas","Eyob","Nahom","Elias","Henok","Binyam","Samson","Yohannes","Amanuel",
@@ -83,17 +82,173 @@ let currentCdMinutes = 3;
 let countdownStartAt = null;
 let realPlayerEntryTimes = [];
 
+// ══ FEATURE 5: BOT POOL (Recycling) ══
+// Firebase ውስጥ bot pool ይጠብቃል - አዲስ IDs አይፈጠርም
+const BOT_POOL_SIZE = 300;
+let botPool = []; // { id, name } array
+let botPoolLoaded = false;
+
+async function loadOrCreateBotPool() {
+  const snap = await get(ref(db, 'botPool'));
+  const existing = snap.val();
+  if (existing && Object.keys(existing).length >= BOT_POOL_SIZE) {
+    botPool = Object.values(existing);
+    botPoolLoaded = true;
+    log(`Bot pool loaded: ${botPool.length} bots`);
+    return;
+  }
+  // Pool አልተፈጠረም → አዲስ እንፍጠር
+  log('Creating new bot pool...');
+  const usedNames = new Set();
+  const pool = {};
+  for (let i = 0; i < BOT_POOL_SIZE; i++) {
+    let name;
+    do { name = getRandomName(); } while (usedNames.has(name));
+    usedNames.add(name);
+    const id = String(7000000000 + i);
+    pool[id] = { id, name };
+    await set(ref(db, `users/${id}/display`), name);
+    await set(ref(db, `users/${id}/is_bot`), true);
+    await set(ref(db, `users/${id}/balance`), 0);
+  }
+  await set(ref(db, 'botPool'), pool);
+  botPool = Object.values(pool);
+  botPoolLoaded = true;
+  log(`Bot pool created: ${botPool.length} bots`);
+}
+
+function getRandomBotFromPool() {
+  if (!botPool.length) return null;
+  return botPool[Math.floor(Math.random() * botPool.length)];
+}
+
+// ══ FEATURE 2: HISTORY LEARNING ══
+// ከቀዳሚ games ተምሮ real player projection ያሻሽላል
+let gameHistory = []; // [{ bet, cdMinutes, realCount, hour }]
+
+async function loadGameHistory() {
+  const snap = await get(ref(db, 'smartBot/history'));
+  const data = snap.val();
+  if (data) {
+    gameHistory = Object.values(data).slice(-50); // last 50 games
+    log(`History loaded: ${gameHistory.length} games`);
+  }
+}
+
+async function saveGameResult(bet, cdMinutes, realCount) {
+  const hour = getEthiopianHour();
+  const entry = { bet, cdMinutes, realCount, hour, time: Date.now() };
+  gameHistory.push(entry);
+  if (gameHistory.length > 50) gameHistory.shift();
+  const key = Date.now();
+  await set(ref(db, `smartBot/history/${key}`), entry);
+}
+
+// ══ FEATURE 4: BET-BASED INTELLIGENCE ══
+// Bet amount ተመልክቶ expected real players ይተነብያል
+function getExpectedRealFromHistory(bet, cdMinutes, currentHour) {
+  if (!gameHistory.length) return null;
+
+  // ተመሳሳይ bet + ሰዓት ያላቸው games ይፈልጋል
+  const similar = gameHistory.filter(g =>
+    Math.abs(g.bet - bet) <= bet * 0.3 && // ±30% bet range
+    Math.abs(g.hour - currentHour) <= 1    // ±1 ሰዓት
+  );
+
+  if (similar.length < 3) return null; // ብዙ data ከሌለ አይጠቀምም
+
+  const avg = similar.reduce((sum, g) => sum + g.realCount, 0) / similar.length;
+  log(`History prediction: ${Math.round(avg)} real players expected (from ${similar.length} similar games)`);
+  return Math.round(avg);
+}
+
+// ══ TIME SYSTEM (Ethiopian Time) ══
+// Ethiopian time = GMT+3, offset by 6 hours from Gregorian
+// Ethiopian hour 12:00 night = GMT+3 6:00am
+
+function getEthiopianHour() {
+  const now = new Date();
+  // GMT+3
+  const gmt3Hours = now.getUTCHours() + 3;
+  const gmt3Minutes = now.getUTCMinutes();
+  // Ethiopian time = GMT+3 - 6 hours
+  let ethHours = gmt3Hours - 6;
+  if (ethHours < 0) ethHours += 24;
+  return ethHours + gmt3Minutes / 60; // decimal hours e.g. 4.5 = 4:30
+}
+
+function getGMT3DecimalHour() {
+  const now = new Date();
+  const h = now.getUTCHours() + 3;
+  const m = now.getUTCMinutes();
+  return (h % 24) + m / 60;
+}
+
+// ══ FEATURE 1: TIME-OF-DAY SPEED MULTIPLIER ══
+// Ethiopian time based
+// ጠዋት 12:00 - 4:50 → slow እያጠነሰ (multiplier ↓)
+// ቀን 4:50 - 10:45 → max speed (multiplier = 1.0)
+// ማታ 10:45 - 12:30 → slow እየሄደ (multiplier ↑)
+// 12:30+ → dead (bot አይግባ)
+
+function getTimeMultiplier() {
+  const ethHour = getEthiopianHour(); // 0-23 decimal
+
+  // Ethiopian clock:
+  // 12:00 midnight eth = 0.0
+  // 4:50 morning eth  = 4.833
+  // 10:45 day eth     = 10.75
+  // 12:30 night eth   = 12.5
+
+  // ☠️ DEAD ZONE: 12:30 ማታ → 12:00 ሌሊት (12.5 to 24/0)
+  if (ethHour >= 12.5 || ethHour < 0) {
+    return null; // dead - bot አይግባ
+  }
+
+  // 🌙 SLOW MORNING: 12:00 ሌሊት → 4:50 ጥዋት (0 to 4.833)
+  // multiplier: 3.0 (12:00) → 1.0 (4:50) - linearly decreasing
+  if (ethHour < 4.833) {
+    const progress = ethHour / 4.833; // 0 to 1
+    const multiplier = 3.0 - (progress * 2.0); // 3.0 → 1.0
+    return multiplier;
+  }
+
+  // 🚀 PEAK ZONE: 4:50 ጥዋት → 10:45 ቀን (4.833 to 10.75)
+  if (ethHour >= 4.833 && ethHour < 10.75) {
+    return 1.0; // max speed - code ሳይቀይር
+  }
+
+  // 🌆 SLOW EVENING: 10:45 ቀን → 12:30 ማታ (10.75 to 12.5)
+  // multiplier: 1.0 (10:45) → 4.0 (12:30) - linearly increasing
+  if (ethHour >= 10.75 && ethHour < 12.5) {
+    const progress = (ethHour - 10.75) / (12.5 - 10.75); // 0 to 1
+    const multiplier = 1.0 + (progress * 3.0); // 1.0 → 4.0
+    return multiplier;
+  }
+
+  return 1.0; // fallback
+}
+
 function log(msg) {
   const now = new Date().toLocaleTimeString('en-ET');
   console.log(`[${now}] 🤖 ${msg}`);
 }
 
+function logEthTime() {
+  const ethHour = getEthiopianHour();
+  const h = Math.floor(ethHour);
+  const m = Math.floor((ethHour - h) * 60);
+  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')} ETH`;
+}
+
 // ══ LISTEN: smartBot/enabled ══
-onValue(ref(db, 'smartBot/enabled'), (snap) => {
+onValue(ref(db, 'smartBot/enabled'), async (snap) => {
   const val = snap.val();
   if (val === true && !smartBotEnabled) {
     smartBotEnabled = true;
     log('Smart Bot ENABLED by admin');
+    if (!botPoolLoaded) await loadOrCreateBotPool();
+    await loadGameHistory();
     startBotEngine();
   } else if (val === false && smartBotEnabled) {
     smartBotEnabled = false;
@@ -103,13 +258,26 @@ onValue(ref(db, 'smartBot/enabled'), (snap) => {
 });
 
 // ══ LISTEN: game/countdown ══
+let lastGameRealCount = 0;
 onValue(ref(db, 'game/countdown'), (snap) => {
   const val = snap.val();
   if (val && val.active && val.startAt) {
+    // New countdown started
+    if (!countdownStartAt || countdownStartAt !== val.startAt) {
+      // Save previous game result
+      if (countdownStartAt && lastGameRealCount > 0) {
+        saveGameResult(
+          lastBet || 0,
+          currentCdMinutes,
+          lastGameRealCount
+        );
+      }
+      lastGameRealCount = 0;
+    }
     countdownStartAt = val.startAt;
     currentCdMinutes = val.cdMinutes || val.mins || 3;
     realPlayerEntryTimes = [];
-    log(`Countdown detected: ${currentCdMinutes} min`);
+    log(`Countdown detected: ${currentCdMinutes} min | ${logEthTime()}`);
     if (smartBotEnabled && !botEngineRunning) {
       startBotEngine();
     }
@@ -121,6 +289,7 @@ onValue(ref(db, 'game/countdown'), (snap) => {
 
 // ══ LISTEN: real player joins ══
 let prevRealCount = 0;
+let lastBet = 0;
 onValue(ref(db, 'game/confirmedNumbers'), async (snap) => {
   const data = snap.val() || {};
   const usersSnap = await get(ref(db, 'users'));
@@ -142,6 +311,7 @@ onValue(ref(db, 'game/confirmedNumbers'), async (snap) => {
     log(`Real player joined! Total real: ${realCount}`);
   }
   prevRealCount = realCount;
+  lastGameRealCount = realCount;
 });
 
 // ══ BOT ENGINE ══
@@ -162,10 +332,49 @@ function stopBotEngine() {
   log('Bot engine stopped');
 }
 
+// ══ FEATURE 3: BURST & PAUSE PATTERN ══
+let burstMode = false;
+let burstCount = 0;
+let pauseUntil = 0;
+
+function shouldApplyBurstPause(now, gapMs) {
+  // Dead pause ውስጥ ከሆነ
+  if (now < pauseUntil) return { skip: true, gapMs };
+
+  // Burst mode ውስጥ ከሆነ
+  if (burstMode) {
+    burstCount--;
+    if (burstCount <= 0) {
+      burstMode = false;
+      // Burst ከጨረሰ በኋላ pause (3-8 ሰከንድ)
+      pauseUntil = now + (3000 + Math.random() * 5000);
+      log('Burst done → pause');
+    }
+    return { skip: false, gapMs: Math.max(200, gapMs * 0.4) }; // burst = ፈጣን
+  }
+
+  // 8% chance → burst ይጀምር
+  if (Math.random() < 0.08) {
+    burstMode = true;
+    burstCount = Math.floor(2 + Math.random() * 3); // 2-4 bots burst
+    log(`Burst started: ${burstCount} bots`);
+    return { skip: false, gapMs: Math.max(200, gapMs * 0.4) };
+  }
+
+  return { skip: false, gapMs };
+}
+
 async function botEngineTick() {
   if (!smartBotEnabled) { stopBotEngine(); return; }
 
   try {
+    // ══ FEATURE 1: TIME CHECK ══
+    const timeMultiplier = getTimeMultiplier();
+    if (timeMultiplier === null) {
+      await set(ref(db, 'smartBot/status'), `DEAD_ZONE|${logEthTime()}`);
+      return; // ☠️ dead zone - bot አይግባ
+    }
+
     const [confSnap, betSnap, pctSnap, statusSnap, cdSnap, usersSnap] = await Promise.all([
       get(ref(db, 'game/confirmedNumbers')),
       get(ref(db, 'game/bet')),
@@ -177,6 +386,7 @@ async function botEngineTick() {
 
     const confData = confSnap.val() || {};
     const bet = betSnap.val() || 0;
+    lastBet = bet;
     const pct = (pctSnap.val() || 80) / 100;
     const statusData = statusSnap.val() || {};
     const cdData = cdSnap.val() || {};
@@ -221,71 +431,94 @@ async function botEngineTick() {
       return;
     }
 
-    // ══ REAL PLAYER SPEED CALCULATION ══
-    // Real players per second (current rate)
+    // ══ FEATURE 2+4: SMART PROJECTION ══
     const realRatePerSec = realPlayers / elapsedSecs;
+    
+    // History ተጠቅሞ ይተነብያል
+    const currentHour = getEthiopianHour();
+    const historyPrediction = getExpectedRealFromHistory(bet, currentCdMinutes, currentHour);
+    
+    // History prediction vs rate-based projection → ትልቁን ይወስዳል
+    const ratePrediction = Math.min(100, Math.round(realRatePerSec * totalSecs));
+    const projectedRealTotal = historyPrediction
+      ? Math.max(ratePrediction, historyPrediction)
+      : ratePrediction;
 
-    // Project total real players by end of countdown
-    const projectedRealTotal = Math.min(100, Math.round(realRatePerSec * totalSecs));
-
-    // Bots needed = 100 - projected real (always ensure 100)
     const projectedBotsNeeded = Math.max(botsNeeded, 100 - projectedRealTotal);
 
-    // Time window: finish bots 5s before countdown ends
+    // FEATURE 4: Bet-based adjustment (fixed thresholds)
+    // 30 በታች  → feature አይሰራም (× 1.0)
+    // 30 ብር   → Normal  (× 1.0)
+    // 40 ብር   → መካከለኛ (× 1.2 ቀስ - real players ሊመጡ ይችላሉ)
+    // 50+ ብር  → ብዙ    (× 1.5 ቀስ - real players ይጠብቅ)
+    let betMultiplier = 1.0;
+    if (bet >= 50) {
+      betMultiplier = 1.5; // ብዙ → ቀስ
+    } else if (bet >= 40) {
+      betMultiplier = 1.2; // መካከለኛ → ትንሽ ቀስ
+    } else if (bet >= 30) {
+      betMultiplier = 1.0; // Normal → እንደነበረ
+    }
+    // 30 በታች → betMultiplier = 1.0 (feature አይሰራም)
+
     const timeWindow = Math.max(1, remainSecs - 5);
-
-    // Required bot rate (bots per second)
     const requiredRate = projectedBotsNeeded / timeWindow;
-
-    // Base gap in ms
     let gapMs = 1000 / requiredRate;
 
-    // ══ HUMAN-LIKE BEHAVIOR ══
-    // Phase timing በ countdown ደቂቃ ይወሰናል
+    // Phase timing
     const progress = elapsedSecs / totalSecs;
     let slowPhase, fastPhase;
     if (currentCdMinutes <= 1) {
-      // 1 ደቂቃ → slow start አጭር፣ fast finish ቀድሞ ይጀምራል
-      slowPhase = 0.05;
-      fastPhase = 0.70;
+      slowPhase = 0.05; fastPhase = 0.70;
     } else if (currentCdMinutes <= 2) {
-      // 2 ደቂቃ → medium
-      slowPhase = 0.10;
-      fastPhase = 0.75;
+      slowPhase = 0.10; fastPhase = 0.75;
     } else {
-      // 3+ ደቂቃ → normal human-like
-      slowPhase = 0.20;
-      fastPhase = 0.80;
+      slowPhase = 0.20; fastPhase = 0.80;
     }
 
     if (progress < slowPhase) {
-      gapMs = gapMs * 1.5; // slow start
+      gapMs = gapMs * 1.5;
     } else if (progress > fastPhase) {
-      gapMs = gapMs * 0.6; // fast finish
+      gapMs = gapMs * 0.6;
     }
 
-    // Random ±15% variation
+    // Random variation ±15%
     const variation = gapMs * 0.15;
     gapMs = gapMs + (Math.random() * variation * 2 - variation);
 
+    // ══ FEATURE 1: APPLY TIME MULTIPLIER ══
+    // Peak zone (multiplier=1.0) → ምንም አይቀይርም
+    // Morning/Evening → gapMs ትልቅ ያደርጋል (ቀስ)
+    gapMs = gapMs * timeMultiplier;
+
+    // ══ FEATURE 4: APPLY BET MULTIPLIER ══
+    gapMs = gapMs * betMultiplier;
+
     // Safety clamps
-    // Min 200ms (ensures we can add fast enough for 1-2 min games)
-    // Max 8s (not too slow)
     gapMs = Math.max(200, Math.min(8000, gapMs));
 
-    // Emergency mode: last 10 seconds and still bots needed → go max speed
+    // Emergency mode
     if (remainSecs <= 10 && botsNeeded > 0) {
       gapMs = 200;
     }
 
+    // ══ FEATURE 3: BURST & PAUSE ══
+    const { skip, gapMs: adjustedGap } = shouldApplyBurstPause(now, gapMs);
+    if (skip) {
+      await set(ref(db, 'smartBot/status'),
+        `PAUSE|${Math.round(remainSecs)}s|ethTime:${logEthTime()}|real:${realPlayers}|botsLeft:${botsNeeded}`
+      );
+      return;
+    }
+
     await set(ref(db, 'smartBot/status'),
-      `ACTIVE|${Math.round(remainSecs)}s|real:${realPlayers}|projReal:${projectedRealTotal}|botsLeft:${botsNeeded}|gap:${Math.round(gapMs)}ms`
+      `ACTIVE|${Math.round(remainSecs)}s|ethTime:${logEthTime()}|real:${realPlayers}|proj:${projectedRealTotal}|botsLeft:${botsNeeded}|gap:${Math.round(adjustedGap)}ms|tMult:${timeMultiplier.toFixed(2)}`
     );
 
-    log(`📊 ${Math.round(remainSecs)}s remain | real:${realPlayers} | projReal:${projectedRealTotal} | botsLeft:${botsNeeded} | gap:${Math.round(gapMs)}ms`);
+    log(`📊 ${Math.round(remainSecs)}s | ETH:${logEthTime()} | real:${realPlayers} | proj:${projectedRealTotal} | botsLeft:${botsNeeded} | gap:${Math.round(adjustedGap)}ms | tMult:×${timeMultiplier.toFixed(2)}`);
 
     // Add bot only if enough time has passed
-    if (now - lastBotAddedTime >= gapMs) {
+    if (now - lastBotAddedTime >= adjustedGap) {
       await addOneBot(confData, usersData, bet, pct, botsNeeded);
     }
 
@@ -294,7 +527,7 @@ async function botEngineTick() {
   }
 }
 
-// ══ ADD ONE BOT ══
+// ══ ADD ONE BOT (uses pool) ══
 async function addOneBot(confData, usersData, bet, pct, botsNeeded) {
   const taken = new Set(Object.keys(confData).map(Number));
   const avail = [];
@@ -309,14 +542,23 @@ async function addOneBot(confData, usersData, bet, pct, botsNeeded) {
     cardCount = Math.random() < 0.6 ? 2 : 3;
   }
 
-  const botName = getRandomName();
-  const fakeBotId = String(7000000000 + Math.floor(Math.random() * 999999999));
+  // ══ FEATURE 5: USE BOT FROM POOL ══
+  let botName, fakeBotId;
+  if (botPoolLoaded && botPool.length) {
+    const poolBot = getRandomBotFromPool();
+    fakeBotId = poolBot.id;
+    botName = poolBot.name;
+  } else {
+    // Fallback to old method
+    botName = getRandomName();
+    fakeBotId = String(7000000000 + Math.floor(Math.random() * 999999999));
+    await set(ref(db, `users/${fakeBotId}/display`), botName);
+    await set(ref(db, `users/${fakeBotId}/is_bot`), true);
+    await set(ref(db, `users/${fakeBotId}/balance`), 0);
+  }
+
   const shuffled = avail.sort(() => Math.random() - 0.5);
   const selectedCards = shuffled.slice(0, cardCount);
-
-  await set(ref(db, `users/${fakeBotId}/display`), botName);
-  await set(ref(db, `users/${fakeBotId}/is_bot`), true);
-  await set(ref(db, `users/${fakeBotId}/balance`), 0);
 
   for (const cardId of selectedCards) {
     await set(ref(db, `game/confirmedNumbers/${cardId}`), fakeBotId);
@@ -336,11 +578,14 @@ async function addOneBot(confData, usersData, bet, pct, botsNeeded) {
     cardId: selectedCards.join(','),
     cards: cardCount,
     time: Date.now(),
-    remaining: botsNeeded - cardCount
+    remaining: botsNeeded - cardCount,
+    ethTime: logEthTime()
   });
 
-  log(`✅ Bot: ${botName} → Card #${selectedCards.join(',')} | ${botsNeeded - cardCount} remaining`);
+  log(`✅ Bot: ${botName} (pool) → Card #${selectedCards.join(',')} | ${botsNeeded - cardCount} remaining`);
 }
 
-log('🚀 Smart Bot Server running');
+// ══ STARTUP ══
+log('🚀 Smart Bot v2.0 running');
+log('Features: Time-of-Day | History Learning | Burst&Pause | Bet Intelligence | Bot Pool');
 log('Listening for smartBot/enabled changes...');
