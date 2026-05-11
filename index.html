@@ -2543,7 +2543,7 @@ window.setIntervalHours = function(hours, el){
 
 window.schedulePromotion = async function(){
   const text = document.getElementById('promoText').value.trim();
-  const photoUrl = document.getElementById('promoPhotoUrl').value.trim();
+  const photoUrl = '';
   const groupId = document.getElementById('promoGroupId').value.trim();
 
   if(!text && !photoUrl){ alert('❌ Message ወይም Photo ያስፈልጋል!'); return; }
@@ -2637,7 +2637,7 @@ window.sendNow = async function(){
     formData.append('groupId', groupId);
     if(file) formData.append('photo', file);
 
-    const resp = await fetch('https://game-production-7f86.up.railway.app/send-promotion', {
+    const resp = await fetch('https://admin-panel-production-b31a.up.railway.app/send-promotion', {
       method: 'POST',
       body: formData
     });
