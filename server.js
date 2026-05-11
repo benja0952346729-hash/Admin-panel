@@ -66,19 +66,58 @@ async function loadCloudinarySounds() {
 app.get('/sounds-map', (req, res) => res.json(soundsMap));
 loadCloudinarySounds();
 
-// ══ SEND PROMOTION ══
+// ══ SEND PROMOTION (አሁን ላክ) ══
 app.post('/send-promotion', multer({ storage: multer.memoryStorage() }).single('photo'), async (req, res) => {
   const { text, targetType, groupId } = req.body;
   const photoBuffer = req.file ? req.file.buffer : null;
   if (!text && !photoBuffer) return res.json({ ok: false, msg: '❌ Message ወይም Photo ያስፈልጋል!' });
   try {
-    // ✅ FIX: photoBuffer ታከለ
     await broadcastPromotion({ text, photoBuffer, targetType, groupId });
     res.json({ ok: true, msg: '✅ Promotion ተላከ!' });
   } catch(e) {
     res.json({ ok: false, msg: '❌ Error: ' + e.message });
   }
 });
+
+// ══ PROMOTION SCHEDULER — FIREBASE BASED ══
+// Firebase: promotions/{key} = { text, photoUrl, targetType, groupId, intervalMs, nextSendAt, active }
+// photo → photoUrl (Cloudinary ወይም ሌላ) — buffer Firebase ላይ አይቀመጥም
+// HTML → Firebase push → server ያነብ → ሲልክ nextSendAt ያዘምናል
+
+function checkPromotions() {
+  db.ref('promotions').once('value', async (snap) => {
+    const promos = snap.val() || {};
+    const now = Date.now();
+    for (let key in promos) {
+      const p = promos[key];
+      if (!p.active) continue;              // active:false → skip
+      if (!p.nextSendAt) continue;
+      if (now < p.nextSendAt) continue;     // ገና ሰዓቱ አልደረሰም
+
+      console.log(`📢 Sending interval promotion: ${key}`);
+      try {
+        await broadcastPromotion({
+          text: p.text || '',
+          photoBuffer: null,                // photo URL ነው — buffer የለም
+          photoUrl: p.photoUrl || '',
+          targetType: p.targetType || 'bot',
+          groupId: p.groupId || ''
+        });
+        // ቀጣዩ send time ያዘምናል
+        await db.ref(`promotions/${key}/nextSendAt`).set(now + (p.intervalMs || 3600000));
+        await db.ref(`promotions/${key}/lastSentAt`).set(now);
+        console.log(`✅ Promotion sent! Next in ${(p.intervalMs||3600000)/3600000}h`);
+      } catch(e) {
+        console.error('❌ Promotion send error:', e.message);
+        // error ቢሆን ደሞ interval ቆጥሮ ይሞክራል
+        await db.ref(`promotions/${key}/nextSendAt`).set(now + (p.intervalMs || 3600000));
+      }
+    }
+  });
+}
+
+setInterval(checkPromotions, 60 * 1000);
+console.log('📢 Promotion interval scheduler started');
 
 // ══ CONFIRM CARD ══
 app.post('/confirm-card', async (req, res) => {
@@ -401,12 +440,12 @@ async function announceWinner() {
   } catch (e) { console.error('❌ announceWinner error:', e.message); }
 }
 
-// ══ PROMOTION BROADCAST — ✅ FIXED (photo support) ══
+// ══ PROMOTION BROADCAST ══
 const BOT_PY_URL = 'https://telegram-bingo-bot-production.up.railway.app/broadcast';
 
 async function broadcastPromotion(promoData) {
   try {
-    const { text, photoBuffer, targetType, groupId } = promoData;
+    const { text, photoBuffer, photoUrl, targetType, groupId } = promoData;
 
     if (targetType === 'group' && groupId) {
       const BOT_TOKEN = process.env.BOT_TOKEN || '';
@@ -436,15 +475,22 @@ async function broadcastPromotion(promoData) {
     } else {
       const url = new URL(BOT_PY_URL);
 
-      if (photoBuffer) {
-        // ✅ photo ካለ multipart/form-data ይላክ
+      if (photoBuffer || photoUrl) {
         const boundary = '----FormBoundary' + Date.now();
-        const body = Buffer.concat([
-          Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="text"\r\n\r\n${text || ''}\r\n`),
-          Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="promo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
-          photoBuffer,
-          Buffer.from(`\r\n--${boundary}--\r\n`)
-        ]);
+        const photoData = photoBuffer || Buffer.from(photoUrl || '');
+        const isUrl = !photoBuffer && !!photoUrl;
+        const body = isUrl
+          ? Buffer.concat([
+              Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="text"\r\n\r\n${text || ''}\r\n`),
+              Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo_url"\r\n\r\n${photoUrl}\r\n`),
+              Buffer.from(`--${boundary}--\r\n`)
+            ])
+          : Buffer.concat([
+              Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="text"\r\n\r\n${text || ''}\r\n`),
+              Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="promo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
+              photoData,
+              Buffer.from(`\r\n--${boundary}--\r\n`)
+            ]);
         await new Promise((resolve) => {
           const options = {
             hostname: url.hostname,
@@ -466,7 +512,6 @@ async function broadcastPromotion(promoData) {
         });
 
       } else {
-        // text only
         const postData = JSON.stringify({ text: text || '' });
         await new Promise((resolve) => {
           const options = {
@@ -501,32 +546,6 @@ async function broadcastPromotion(promoData) {
     console.error('❌ broadcastPromotion error:', e.message);
   }
 }
-
-// ══ PROMOTION SCHEDULER ══
-function checkPromotions() {
-  db.ref('promotions').once('value', async (snap) => {
-    const promos = snap.val() || {};
-    const now = Date.now();
-    for (let key in promos) {
-      const p = promos[key];
-      if (p.sent) continue;
-      if (!p.scheduledAt) continue;
-      if (now >= p.scheduledAt) {
-        console.log(`📢 Sending promotion: ${key}`);
-        await broadcastPromotion(p);
-        await db.ref(`promotions/${key}/sent`).set(true);
-        await db.ref(`promotions/${key}/sentAt`).set(now);
-        if (p.recurring && p.intervalMs) {
-          await db.ref(`promotions/${key}/scheduledAt`).set(now + p.intervalMs);
-          await db.ref(`promotions/${key}/sent`).set(false);
-        }
-      }
-    }
-  });
-}
-
-setInterval(checkPromotions, 60 * 1000);
-console.log('📢 Promotion scheduler started');
 
 async function scheduleNextRound() {
   if (!autoModeOn) return;
