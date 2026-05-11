@@ -72,6 +72,7 @@ app.post('/send-promotion', multer({ storage: multer.memoryStorage() }).single('
   const photoBuffer = req.file ? req.file.buffer : null;
   if (!text && !photoBuffer) return res.json({ ok: false, msg: '❌ Message ወይም Photo ያስፈልጋል!' });
   try {
+    // ✅ FIX: photoBuffer ታከለ
     await broadcastPromotion({ text, photoBuffer, targetType, groupId });
     res.json({ ok: true, msg: '✅ Promotion ተላከ!' });
   } catch(e) {
@@ -400,15 +401,14 @@ async function announceWinner() {
   } catch (e) { console.error('❌ announceWinner error:', e.message); }
 }
 
-// ══ PROMOTION BROADCAST — bot.py ይጠራል ══
+// ══ PROMOTION BROADCAST — ✅ FIXED (photo support) ══
 const BOT_PY_URL = 'https://telegram-bingo-bot-production.up.railway.app/broadcast';
 
 async function broadcastPromotion(promoData) {
   try {
-    const { text, targetType, groupId } = promoData;
+    const { text, photoBuffer, targetType, groupId } = promoData;
 
     if (targetType === 'group' && groupId) {
-      // Group ላይ ቀጥታ Telegram API ይጠቀም
       const BOT_TOKEN = process.env.BOT_TOKEN || '';
       const bodyData = JSON.stringify({
         chat_id: groupId,
@@ -432,38 +432,70 @@ async function broadcastPromotion(promoData) {
         req.end();
       });
       console.log(`✅ Promotion sent to group: ${groupId}`);
+
     } else {
-      // ሁሉም users — bot.py /broadcast endpoint ይጠራ
-      const fetch = require('https');
-      const postData = JSON.stringify({ text: text || '' });
-      await new Promise((resolve) => {
-        const url = new URL(BOT_PY_URL);
-        const options = {
-          hostname: url.hostname,
-          path: url.pathname,
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Content-Length': Buffer.byteLength(postData)
-          }
-        };
-        const req = fetch.request(options, (res) => {
-          let d = '';
-          res.on('data', chunk => d += chunk);
-          res.on('end', () => {
-            try {
-              const result = JSON.parse(d);
-              console.log('✅ Broadcast result:', result.msg);
-            } catch(e) {
-              console.log('Broadcast response:', d);
+      const url = new URL(BOT_PY_URL);
+
+      if (photoBuffer) {
+        // ✅ photo ካለ multipart/form-data ይላክ
+        const boundary = '----FormBoundary' + Date.now();
+        const body = Buffer.concat([
+          Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="text"\r\n\r\n${text || ''}\r\n`),
+          Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="promo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
+          photoBuffer,
+          Buffer.from(`\r\n--${boundary}--\r\n`)
+        ]);
+        await new Promise((resolve) => {
+          const options = {
+            hostname: url.hostname,
+            path: url.pathname,
+            method: 'POST',
+            headers: {
+              'Content-Type': `multipart/form-data; boundary=${boundary}`,
+              'Content-Length': body.length
             }
-            resolve();
+          };
+          const req = require('https').request(options, (res) => {
+            let d = '';
+            res.on('data', chunk => d += chunk);
+            res.on('end', () => { console.log('✅ Broadcast result:', d); resolve(); });
           });
+          req.on('error', (e) => { console.error('❌ Broadcast error:', e.message); resolve(); });
+          req.write(body);
+          req.end();
         });
-        req.on('error', (e) => { console.error('❌ Broadcast error:', e.message); resolve(); });
-        req.write(postData);
-        req.end();
-      });
+
+      } else {
+        // text only
+        const postData = JSON.stringify({ text: text || '' });
+        await new Promise((resolve) => {
+          const options = {
+            hostname: url.hostname,
+            path: url.pathname,
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(postData)
+            }
+          };
+          const req = require('https').request(options, (res) => {
+            let d = '';
+            res.on('data', chunk => d += chunk);
+            res.on('end', () => {
+              try {
+                const result = JSON.parse(d);
+                console.log('✅ Broadcast result:', result.msg);
+              } catch(e) {
+                console.log('Broadcast response:', d);
+              }
+              resolve();
+            });
+          });
+          req.on('error', (e) => { console.error('❌ Broadcast error:', e.message); resolve(); });
+          req.write(postData);
+          req.end();
+        });
+      }
     }
   } catch(e) {
     console.error('❌ broadcastPromotion error:', e.message);
