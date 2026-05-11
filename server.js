@@ -65,7 +65,68 @@ async function loadCloudinarySounds() {
 
 app.get('/sounds-map', (req, res) => res.json(soundsMap));
 loadCloudinarySounds();
+app.post('/create-interval-promotion', multer({ storage: multer.memoryStorage() }).single('photo'), async (req, res) => {
+  const { text, targetType, groupId, intervalMs } = req.body;
+  const photoBuffer = req.file ? req.file.buffer : null;
+  
+  if (!text && !photoBuffer) return res.json({ ok: false, msg: '❌ Message ወይም Photo ያስፈልጋል!' });
 
+  try {
+    let photoUrl = '';
+    
+    // Photo ካለ Cloudinary upload
+    if (photoBuffer) {
+      const auth = Buffer.from(`${CLOUDINARY_API_KEY}:${CLOUDINARY_API_SECRET}`).toString('base64');
+      const boundary = '----FormBoundary' + Date.now();
+      const body = Buffer.concat([
+        Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="promo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
+        photoBuffer,
+        Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="upload_preset"\r\n\r\nunsigned_preset\r\n--${boundary}--\r\n`)
+      ]);
+      
+      photoUrl = await new Promise((resolve) => {
+        const options = {
+          hostname: 'api.cloudinary.com',
+          path: `/v1_1/${CLOUDINARY_CLOUD}/image/upload`,
+          method: 'POST',
+          headers: {
+            'Content-Type': `multipart/form-data; boundary=${boundary}`,
+            'Content-Length': body.length,
+            'Authorization': `Basic ${auth}`
+          }
+        };
+        const request = require('https').request(options, (r) => {
+          let d = '';
+          r.on('data', chunk => d += chunk);
+          r.on('end', () => {
+            try { resolve(JSON.parse(d).secure_url || ''); }
+            catch(e) { resolve(''); }
+          });
+        });
+        request.on('error', () => resolve(''));
+        request.write(body);
+        request.end();
+      });
+    }
+
+    // Firebase push
+    const promoRef = db.ref('promotions').push();
+    await promoRef.set({
+      text: text || '',
+      photoUrl,
+      targetType: targetType || 'bot',
+      groupId: groupId || '',
+      intervalMs: Number(intervalMs) || 3600000,
+      nextSendAt: Date.now() + Number(intervalMs),
+      active: true,
+      createdAt: Date.now()
+    });
+
+    res.json({ ok: true, msg: '✅ Interval promotion ተጀምሯል!' });
+  } catch(e) {
+    res.json({ ok: false, msg: '❌ Error: ' + e.message });
+  }
+});
 // ══ SEND PROMOTION (አሁን ላክ) ══
 app.post('/send-promotion', multer({ storage: multer.memoryStorage() }).single('photo'), async (req, res) => {
   const { text, targetType, groupId } = req.body;
@@ -475,22 +536,15 @@ async function broadcastPromotion(promoData) {
     } else {
       const url = new URL(BOT_PY_URL);
 
-      if (photoBuffer || photoUrl) {
+      if (photoBuffer) {
+        // Buffer ነው — directly upload
         const boundary = '----FormBoundary' + Date.now();
-        const photoData = photoBuffer || Buffer.from(photoUrl || '');
-        const isUrl = !photoBuffer && !!photoUrl;
-        const body = isUrl
-          ? Buffer.concat([
-              Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="text"\r\n\r\n${text || ''}\r\n`),
-              Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo_url"\r\n\r\n${photoUrl}\r\n`),
-              Buffer.from(`--${boundary}--\r\n`)
-            ])
-          : Buffer.concat([
-              Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="text"\r\n\r\n${text || ''}\r\n`),
-              Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="promo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
-              photoData,
-              Buffer.from(`\r\n--${boundary}--\r\n`)
-            ]);
+        const body = Buffer.concat([
+          Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="text"\r\n\r\n${text || ''}\r\n`),
+          Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="promo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
+          photoBuffer,
+          Buffer.from(`\r\n--${boundary}--\r\n`)
+        ]);
         await new Promise((resolve) => {
           const options = {
             hostname: url.hostname,
@@ -501,17 +555,46 @@ async function broadcastPromotion(promoData) {
               'Content-Length': body.length
             }
           };
-          const req = require('https').request(options, (res) => {
+          const req = require('https').request(options, (r) => {
             let d = '';
-            res.on('data', chunk => d += chunk);
-            res.on('end', () => { console.log('✅ Broadcast result:', d); resolve(); });
+            r.on('data', chunk => d += chunk);
+            r.on('end', () => { console.log('✅ Buffer broadcast:', d); resolve(); });
           });
-          req.on('error', (e) => { console.error('❌ Broadcast error:', e.message); resolve(); });
+          req.on('error', (e) => { console.error('❌ error:', e.message); resolve(); });
+          req.write(body);
+          req.end();
+        });
+
+      } else if (photoUrl) {
+        // URL ነው — photo_url ጋር እንልካለን
+        const boundary = '----FormBoundary' + Date.now();
+        const body = Buffer.concat([
+          Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="text"\r\n\r\n${text || ''}\r\n`),
+          Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo_url"\r\n\r\n${photoUrl}\r\n`),
+          Buffer.from(`--${boundary}--\r\n`)
+        ]);
+        await new Promise((resolve) => {
+          const options = {
+            hostname: url.hostname,
+            path: url.pathname,
+            method: 'POST',
+            headers: {
+              'Content-Type': `multipart/form-data; boundary=${boundary}`,
+              'Content-Length': body.length
+            }
+          };
+          const req = require('https').request(options, (r) => {
+            let d = '';
+            r.on('data', chunk => d += chunk);
+            r.on('end', () => { console.log('✅ URL broadcast:', d); resolve(); });
+          });
+          req.on('error', (e) => { console.error('❌ error:', e.message); resolve(); });
           req.write(body);
           req.end();
         });
 
       } else {
+        // Text ብቻ
         const postData = JSON.stringify({ text: text || '' });
         await new Promise((resolve) => {
           const options = {
@@ -523,20 +606,20 @@ async function broadcastPromotion(promoData) {
               'Content-Length': Buffer.byteLength(postData)
             }
           };
-          const req = require('https').request(options, (res) => {
+          const req = require('https').request(options, (r) => {
             let d = '';
-            res.on('data', chunk => d += chunk);
-            res.on('end', () => {
+            r.on('data', chunk => d += chunk);
+            r.on('end', () => {
               try {
                 const result = JSON.parse(d);
-                console.log('✅ Broadcast result:', result.msg);
+                console.log('✅ Text broadcast:', result.msg);
               } catch(e) {
                 console.log('Broadcast response:', d);
               }
               resolve();
             });
           });
-          req.on('error', (e) => { console.error('❌ Broadcast error:', e.message); resolve(); });
+          req.on('error', (e) => { console.error('❌ error:', e.message); resolve(); });
           req.write(postData);
           req.end();
         });
@@ -546,7 +629,6 @@ async function broadcastPromotion(promoData) {
     console.error('❌ broadcastPromotion error:', e.message);
   }
 }
-
 async function scheduleNextRound() {
   if (!autoModeOn) return;
   try {
@@ -598,4 +680,4 @@ async function scheduleNextRound() {
     console.error('❌ scheduleNextRound error:', e.message);
     setTimeout(() => { if (autoModeOn) startAutoCountdown(); }, 15000);
   }
-                                 }
+}
