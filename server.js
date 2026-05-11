@@ -65,74 +65,11 @@ async function loadCloudinarySounds() {
 
 app.get('/sounds-map', (req, res) => res.json(soundsMap));
 loadCloudinarySounds();
-async function uploadToCloudinary(buffer) {
-  return new Promise((resolve, reject) => {
 
-    const boundary = '----NodeBoundary' + Date.now();
-
-    const body = Buffer.concat([
-      Buffer.from(`--${boundary}\r\n`),
-      Buffer.from(`Content-Disposition: form-data; name="file"; filename="promo.jpg"\r\n`),
-      Buffer.from(`Content-Type: image/jpeg\r\n\r\n`),
-      buffer,
-      Buffer.from(`\r\n--${boundary}\r\n`),
-      Buffer.from(`Content-Disposition: form-data; name="upload_preset"\r\n\r\n`),
-      Buffer.from(`ml_default\r\n`),
-      Buffer.from(`--${boundary}--\r\n`)
-    ]);
-
-    const options = {
-      hostname: 'api.cloudinary.com',
-      path: `/v1_1/${CLOUDINARY_CLOUD}/image/upload`,
-      method: 'POST',
-      headers: {
-        'Content-Type': `multipart/form-data; boundary=${boundary}`,
-        'Content-Length': body.length
-      }
-    };
-
-    const req = https.request(options, (res) => {
-
-      let data = '';
-
-      res.on('data', chunk => data += chunk);
-
-      res.on('end', () => {
-
-        try {
-
-          const json = JSON.parse(data);
-
-          if(json.secure_url){
-            resolve(json.secure_url);
-          } else {
-            reject(json);
-          }
-
-        } catch(e){
-          reject(e);
-        }
-
-      });
-
-    });
-
-    req.on('error', reject);
-
-    req.write(body);
-    req.end();
-
-  });
-}
 // ══ SEND PROMOTION (አሁን ላክ) ══
 app.post('/send-promotion', multer({ storage: multer.memoryStorage() }).single('photo'), async (req, res) => {
   const { text, targetType, groupId } = req.body;
   const photoBuffer = req.file ? req.file.buffer : null;
-  let photoUrl = '';
-
-if(photoBuffer){
-  photoUrl = await uploadToCloudinary(photoBuffer);
-}
   if (!text && !photoBuffer) return res.json({ ok: false, msg: '❌ Message ወይም Photo ያስፈልጋል!' });
   try {
     await broadcastPromotion({ text, photoBuffer, targetType, groupId });
@@ -661,4 +598,4 @@ async function scheduleNextRound() {
     console.error('❌ scheduleNextRound error:', e.message);
     setTimeout(() => { if (autoModeOn) startAutoCountdown(); }, 15000);
   }
-      }
+                                 }
