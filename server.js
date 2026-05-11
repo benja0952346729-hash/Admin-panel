@@ -65,6 +65,7 @@ async function loadCloudinarySounds() {
 
 app.get('/sounds-map', (req, res) => res.json(soundsMap));
 loadCloudinarySounds();
+
 // ══ SEND PROMOTION ══
 app.post('/send-promotion', multer({ storage: multer.memoryStorage() }).single('photo'), async (req, res) => {
   const { text, targetType, groupId } = req.body;
@@ -77,6 +78,7 @@ app.post('/send-promotion', multer({ storage: multer.memoryStorage() }).single('
     res.json({ ok: false, msg: '❌ Error: ' + e.message });
   }
 });
+
 // ══ CONFIRM CARD ══
 app.post('/confirm-card', async (req, res) => {
   const { userId, cardId } = req.body;
@@ -162,9 +164,6 @@ function checkWin(board, called) {
   return false;
 }
 
-// ══ COLUMN CLOSE CHECK ══
-// Board layout: columns are B(0,5,10,15,20), I(1,6,11,16,21), N(2,7,12,17,22), G(3,8,13,18,23), O(4,9,14,19,24)
-// Returns true if calling number `n` would complete or nearly-complete (4/5) a column on ANY board
 function wouldCloseColumnSoon(n, allBoards, called) {
   const colIndices = [
     [0, 5, 10, 15, 20],
@@ -173,16 +172,12 @@ function wouldCloseColumnSoon(n, allBoards, called) {
     [3, 8, 13, 18, 23],
     [4, 9, 14, 19, 24],
   ];
-
   const simulatedCalled = [...called, n];
-
   for (let cardId in allBoards) {
     const board = allBoards[cardId];
     for (let col of colIndices) {
       const cells = col.map(i => board[i]);
       const matched = cells.filter(c => c === 'FREE' || simulatedCalled.includes(c)).length;
-      // If this number would make 5/5 column (win) — allow it (true winner ሁሌም ያሸንፋል)
-      // If it would make 4/5 — avoid it to slow game
       if (matched === 4) return true;
     }
   }
@@ -310,34 +305,21 @@ async function autoCallNumber(speed) {
         return;
       }
 
-      // ══ SMART NUMBER SELECTION ══
-      // Step 1: Target card ቁጥሮች (65% bias) — እንዳለ ይቀራል
       const neededRemaining = remaining.filter(n => neededNums.includes(n) && !calledNumbers.includes(n));
-
-      // Step 2: Column ቶሎ እንዳይዘጋ — 4/5 column ሊዘጋ የሚችሉ ቁጥሮች ያስቀር
-      // ግን ሁሉም remaining ቁጥሮች column ይዘጋሉ ከሆነ — ጨዋታ እንዳይቆም ያስቀር
       let safeRemaining = remaining.filter(n => !wouldCloseColumnSoon(n, allBoards, calledNumbers));
-
-      // ሁሉም ቁጥሮች column ይዘጋሉ ከሆነ safe filter አናደርግም
       if (safeRemaining.length === 0) {
         safeRemaining = remaining;
         console.log('⚠️ All remaining numbers close columns — skipping column filter');
       }
-
-      // Step 3: neededRemaining ከ safeRemaining ጋር intersect
       const safeNeeded = neededRemaining.filter(n => safeRemaining.includes(n));
 
       let n;
       const rand = Math.random();
-
       if (safeNeeded.length > 0 && rand < 0.65) {
-        // Target card ቁጥር — column ደህና
         n = safeNeeded[Math.floor(Math.random() * safeNeeded.length)];
       } else if (safeRemaining.length > 0) {
-        // Safe random ቁጥር
         n = safeRemaining[Math.floor(Math.random() * safeRemaining.length)];
       } else {
-        // Fallback — ሁሉም remaining
         n = remaining[Math.floor(Math.random() * remaining.length)];
       }
 
@@ -348,7 +330,6 @@ async function autoCallNumber(speed) {
       const prize = Math.floor(((await db.ref('game/total').get()).val() || 0) * (((await db.ref('game/percent').get()).val() || 80) / 100));
       await db.ref('game/prize').set(prize);
 
-      // ══ TRUE WINNER CHECK — ሁሌም ያሸንፋል ══
       const winners = [];
       for (let cardId in allBoards) {
         if (checkWin(allBoards[cardId], calledNumbers))
@@ -418,123 +399,91 @@ async function announceWinner() {
     console.log(`✅ Paid! ${share} ብር to ${winners.length} winner(s)`);
   } catch (e) { console.error('❌ announceWinner error:', e.message); }
 }
-// ══ PROMOTION BROADCAST ══
-const BOT_TOKEN = process.env.BOT_TOKEN || "";
 
-async function sendTelegramMessage(chatId, text, photo, keyboard) {
-  return new Promise((resolve) => {
-    const keyboard_markup = keyboard ? { inline_keyboard: keyboard } : undefined;
-
-    if (photo && Buffer.isBuffer(photo)) {
-      const boundary = '----TGBoundary' + Date.now();
-      const textPart = text ? `--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${text}\r\n` : '';
-      const parsePart = `--${boundary}\r\nContent-Disposition: form-data; name="parse_mode"\r\n\r\nHTML\r\n`;
-      const kbPart = keyboard_markup ? `--${boundary}\r\nContent-Disposition: form-data; name="reply_markup"\r\n\r\n${JSON.stringify(keyboard_markup)}\r\n` : '';
-      const filePart = `--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="photo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`;
-      const ending = `\r\n--${boundary}--\r\n`;
-      const body = Buffer.concat([
-        Buffer.from(textPart + parsePart + kbPart + filePart),
-        photo,
-        Buffer.from(ending)
-      ]);
-      const options = {
-        hostname: "api.telegram.org",
-        path: `/bot${BOT_TOKEN}/sendPhoto`,
-        method: "POST",
-        headers: {
-          "Content-Type": `multipart/form-data; boundary=${boundary}`,
-          "Content-Length": body.length
-        }
-      };
-      const req = https.request(options, (res) => {
-        let d = "";
-        res.on("data", chunk => d += chunk);
-        res.on("end", () => { try { resolve(JSON.parse(d)); } catch(e) { resolve(null); } });
-      });
-      req.on("error", (e) => { console.error("Telegram error:", e.message); resolve(null); });
-      req.write(body);
-      req.end();
-    } else {
-      const bodyData = JSON.stringify(photo ? {
-        chat_id: chatId, photo, caption: text, parse_mode: "HTML", reply_markup: keyboard_markup
-      } : {
-        chat_id: chatId, text, parse_mode: "HTML", reply_markup: keyboard_markup
-      });
-      const options = {
-        hostname: "api.telegram.org",
-        path: `/bot${BOT_TOKEN}/${photo ? 'sendPhoto' : 'sendMessage'}`,
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(bodyData) }
-      };
-      const req = https.request(options, (res) => {
-        let d = "";
-        res.on("data", chunk => d += chunk);
-        res.on("end", () => { try { resolve(JSON.parse(d)); } catch(e) { resolve(null); } });
-      });
-      req.on("error", (e) => { console.error("Telegram error:", e.message); resolve(null); });
-      req.write(bodyData);
-      req.end();
-    }
-  });
-}
+// ══ PROMOTION BROADCAST — bot.py ይጠራል ══
+const BOT_PY_URL = 'https://telegram-bingo-bot-production.up.railway.app/broadcast';
 
 async function broadcastPromotion(promoData) {
   try {
-    const { text, photoUrl, photoBuffer, targetType, groupId } = promoData;
-    const photoData = photoBuffer || photoUrl || null;
+    const { text, targetType, groupId } = promoData;
 
-    const keyboard = [[{
-      text: "🎮 Play Now",
-      web_app: { url: "https://game-production-7f86.up.railway.app" }
-    }]];
-
-    if (targetType === "group" && groupId) {
-      // Group ላይ ብቻ ይላካል
-      await sendTelegramMessage(groupId, text || "", photoData, keyboard);
+    if (targetType === 'group' && groupId) {
+      // Group ላይ ቀጥታ Telegram API ይጠቀም
+      const BOT_TOKEN = process.env.BOT_TOKEN || '';
+      const bodyData = JSON.stringify({
+        chat_id: groupId,
+        text: text || '',
+        parse_mode: 'HTML'
+      });
+      await new Promise((resolve) => {
+        const options = {
+          hostname: 'api.telegram.org',
+          path: `/bot${BOT_TOKEN}/sendMessage`,
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(bodyData) }
+        };
+        const req = require('https').request(options, (res) => {
+          let d = '';
+          res.on('data', chunk => d += chunk);
+          res.on('end', () => { console.log('Group promo:', d); resolve(); });
+        });
+        req.on('error', (e) => { console.error('Group promo error:', e.message); resolve(); });
+        req.write(bodyData);
+        req.end();
+      });
       console.log(`✅ Promotion sent to group: ${groupId}`);
     } else {
-      // ሁሉም users ላይ ይላካል
-      const usersSnap = await db.ref("users").get();
-      const users = usersSnap.val() || {};
-      let sent = 0, failed = 0;
-
-      for (let uid in users) {
-        if (users[uid]?.is_bot) continue;
-        try {
-          const result = await sendTelegramMessage(uid, text || "", photoData, keyboard);
-          console.log('TG:', uid, JSON.stringify(result));
-          sent++;
-          await new Promise(r => setTimeout(r, 50));
-        } catch(e) {
-          console.log('TG error:', uid, e.message);
-          failed++;
-        }
-      }
-      console.log(`✅ Broadcast done: ${sent} sent, ${failed} failed`);
+      // ሁሉም users — bot.py /broadcast endpoint ይጠራ
+      const fetch = require('https');
+      const postData = JSON.stringify({ text: text || '' });
+      await new Promise((resolve) => {
+        const url = new URL(BOT_PY_URL);
+        const options = {
+          hostname: url.hostname,
+          path: url.pathname,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(postData)
+          }
+        };
+        const req = fetch.request(options, (res) => {
+          let d = '';
+          res.on('data', chunk => d += chunk);
+          res.on('end', () => {
+            try {
+              const result = JSON.parse(d);
+              console.log('✅ Broadcast result:', result.msg);
+            } catch(e) {
+              console.log('Broadcast response:', d);
+            }
+            resolve();
+          });
+        });
+        req.on('error', (e) => { console.error('❌ Broadcast error:', e.message); resolve(); });
+        req.write(postData);
+        req.end();
+      });
     }
   } catch(e) {
-    console.error("❌ broadcastPromotion error:", e.message);
+    console.error('❌ broadcastPromotion error:', e.message);
   }
 }
 
 // ══ PROMOTION SCHEDULER ══
 function checkPromotions() {
-  db.ref("promotions").once("value", async (snap) => {
+  db.ref('promotions').once('value', async (snap) => {
     const promos = snap.val() || {};
     const now = Date.now();
-
     for (let key in promos) {
       const p = promos[key];
       if (p.sent) continue;
       if (!p.scheduledAt) continue;
-
       if (now >= p.scheduledAt) {
         console.log(`📢 Sending promotion: ${key}`);
         await broadcastPromotion(p);
         await db.ref(`promotions/${key}/sent`).set(true);
         await db.ref(`promotions/${key}/sentAt`).set(now);
-
-        // Recurring ከሆነ next time ይቀመጥ
         if (p.recurring && p.intervalMs) {
           await db.ref(`promotions/${key}/scheduledAt`).set(now + p.intervalMs);
           await db.ref(`promotions/${key}/sent`).set(false);
@@ -544,9 +493,9 @@ function checkPromotions() {
   });
 }
 
-// ሰዓት ሰዓት check
-setInterval(checkPromotions, 60 * 1000); // every minute
-console.log("📢 Promotion scheduler started");
+setInterval(checkPromotions, 60 * 1000);
+console.log('📢 Promotion scheduler started');
+
 async function scheduleNextRound() {
   if (!autoModeOn) return;
   try {
