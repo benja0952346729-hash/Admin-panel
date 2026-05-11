@@ -501,10 +501,12 @@ async function broadcastPromotion(promoData) {
       for (let uid in users) {
         if (users[uid]?.is_bot) continue;
         try {
-          await sendTelegramMessage(uid, text || "", photoData, keyboard);
+          const result = await sendTelegramMessage(uid, text || "", photoData, keyboard);
+          console.log('TG:', uid, JSON.stringify(result));
           sent++;
-          await new Promise(r => setTimeout(r, 50)); // rate limit
+          await new Promise(r => setTimeout(r, 50));
         } catch(e) {
+          console.log('TG error:', uid, e.message);
           failed++;
         }
       }
@@ -596,4 +598,4 @@ async function scheduleNextRound() {
     console.error('❌ scheduleNextRound error:', e.message);
     setTimeout(() => { if (autoModeOn) startAutoCountdown(); }, 15000);
   }
-                }
+}
