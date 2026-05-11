@@ -4,7 +4,7 @@ const cors = require('cors');
 const app = express();
 const path = require('path');
 const https = require('https');
-
+const multer = require('multer');
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -61,7 +61,18 @@ async function loadCloudinarySounds() {
 
 app.get('/sounds-map', (req, res) => res.json(soundsMap));
 loadCloudinarySounds();
-
+// ══ SEND PROMOTION ══
+app.post('/send-promotion', multer({ storage: multer.memoryStorage() }).single('photo'), async (req, res) => {
+  const { text, targetType, groupId } = req.body;
+  const photoBuffer = req.file ? req.file.buffer : null;
+  if (!text && !photoBuffer) return res.json({ ok: false, msg: '❌ Message ወይም Photo ያስፈልጋል!' });
+  try {
+    await broadcastPromotion({ text, photoBuffer, targetType, groupId });
+    res.json({ ok: true, msg: '✅ Promotion ተላከ!' });
+  } catch(e) {
+    res.json({ ok: false, msg: '❌ Error: ' + e.message });
+  }
+});
 // ══ CONFIRM CARD ══
 app.post('/confirm-card', async (req, res) => {
   const { userId, cardId } = req.body;
@@ -406,59 +417,67 @@ async function announceWinner() {
 // ══ PROMOTION BROADCAST ══
 const BOT_TOKEN = process.env.BOT_TOKEN || "";
 
-async function sendTelegramMessage(chatId, text, photoUrl, keyboard) {
+async function sendTelegramMessage(chatId, text, photo, keyboard) {
   return new Promise((resolve) => {
-    const data = JSON.stringify(photoUrl ? {
-      chat_id: chatId,
-      caption: text,
-      parse_mode: "HTML",
-      reply_markup: keyboard ? { inline_keyboard: keyboard } : undefined
-    } : {
-      chat_id: chatId,
-      text: text,
-      parse_mode: "HTML",
-      reply_markup: keyboard ? { inline_keyboard: keyboard } : undefined
-    });
+    const keyboard_markup = keyboard ? { inline_keyboard: keyboard } : undefined;
 
-    const path = photoUrl
-      ? `/bot${BOT_TOKEN}/sendPhoto`
-      : `/bot${BOT_TOKEN}/sendMessage`;
-
-    // If photo, we need to send via URL
-    const bodyData = photoUrl
-      ? JSON.stringify({
-          chat_id: chatId,
-          photo: photoUrl,
-          caption: text,
-          parse_mode: "HTML",
-          reply_markup: keyboard ? { inline_keyboard: keyboard } : undefined
-        })
-      : data;
-
-    const options = {
-      hostname: "api.telegram.org",
-      path: path,
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(bodyData)
-      }
-    };
-
-    const req = https.request(options, (res) => {
-      let d = "";
-      res.on("data", chunk => d += chunk);
-      res.on("end", () => resolve(JSON.parse(d)));
-    });
-    req.on("error", (e) => { console.error("Telegram error:", e.message); resolve(null); });
-    req.write(bodyData);
-    req.end();
+    if (photo && Buffer.isBuffer(photo)) {
+      const boundary = '----TGBoundary' + Date.now();
+      const textPart = text ? `--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${text}\r\n` : '';
+      const parsePart = `--${boundary}\r\nContent-Disposition: form-data; name="parse_mode"\r\n\r\nHTML\r\n`;
+      const kbPart = keyboard_markup ? `--${boundary}\r\nContent-Disposition: form-data; name="reply_markup"\r\n\r\n${JSON.stringify(keyboard_markup)}\r\n` : '';
+      const filePart = `--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="photo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`;
+      const ending = `\r\n--${boundary}--\r\n`;
+      const body = Buffer.concat([
+        Buffer.from(textPart + parsePart + kbPart + filePart),
+        photo,
+        Buffer.from(ending)
+      ]);
+      const options = {
+        hostname: "api.telegram.org",
+        path: `/bot${BOT_TOKEN}/sendPhoto`,
+        method: "POST",
+        headers: {
+          "Content-Type": `multipart/form-data; boundary=${boundary}`,
+          "Content-Length": body.length
+        }
+      };
+      const req = https.request(options, (res) => {
+        let d = "";
+        res.on("data", chunk => d += chunk);
+        res.on("end", () => { try { resolve(JSON.parse(d)); } catch(e) { resolve(null); } });
+      });
+      req.on("error", (e) => { console.error("Telegram error:", e.message); resolve(null); });
+      req.write(body);
+      req.end();
+    } else {
+      const bodyData = JSON.stringify(photo ? {
+        chat_id: chatId, photo, caption: text, parse_mode: "HTML", reply_markup: keyboard_markup
+      } : {
+        chat_id: chatId, text, parse_mode: "HTML", reply_markup: keyboard_markup
+      });
+      const options = {
+        hostname: "api.telegram.org",
+        path: `/bot${BOT_TOKEN}/${photo ? 'sendPhoto' : 'sendMessage'}`,
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(bodyData) }
+      };
+      const req = https.request(options, (res) => {
+        let d = "";
+        res.on("data", chunk => d += chunk);
+        res.on("end", () => { try { resolve(JSON.parse(d)); } catch(e) { resolve(null); } });
+      });
+      req.on("error", (e) => { console.error("Telegram error:", e.message); resolve(null); });
+      req.write(bodyData);
+      req.end();
+    }
   });
 }
 
 async function broadcastPromotion(promoData) {
   try {
-    const { text, photoUrl, targetType, groupId } = promoData;
+    const { text, photoUrl, photoBuffer, targetType, groupId } = promoData;
+    const photoData = photoBuffer || photoUrl || null;
 
     const keyboard = [[{
       text: "🎮 Play Now",
@@ -467,7 +486,7 @@ async function broadcastPromotion(promoData) {
 
     if (targetType === "group" && groupId) {
       // Group ላይ ብቻ ይላካል
-      await sendTelegramMessage(groupId, text || "", photoUrl || null, keyboard);
+      await sendTelegramMessage(groupId, text || "", photoData, keyboard);
       console.log(`✅ Promotion sent to group: ${groupId}`);
     } else {
       // ሁሉም users ላይ ይላካል
@@ -478,7 +497,7 @@ async function broadcastPromotion(promoData) {
       for (let uid in users) {
         if (users[uid]?.is_bot) continue;
         try {
-          await sendTelegramMessage(uid, text || "", photoUrl || null, keyboard);
+          await sendTelegramMessage(uid, text || "", photoData, keyboard);
           sent++;
           await new Promise(r => setTimeout(r, 50)); // rate limit
         } catch(e) {
@@ -573,4 +592,4 @@ async function scheduleNextRound() {
     console.error('❌ scheduleNextRound error:', e.message);
     setTimeout(() => { if (autoModeOn) startAutoCountdown(); }, 15000);
   }
-                   }
+                }
