@@ -1,4 +1,12 @@
+const express = require('express');
+const cors = require('cors');
+const path = require('path');
+const https = require('https');
+const multer = require('multer');
 const { Pool } = require('pg');
+
+const app = express();
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
@@ -676,4 +684,4 @@ async function scheduleNextRound() {
     console.error('❌ scheduleNextRound error:', e.message);
     setTimeout(() => { if (autoModeOn) startAutoCountdown(); }, 15000);
   }
-  }
+            }
