@@ -12,6 +12,23 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
+async function initDB() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS game_state (key TEXT PRIMARY KEY, value TEXT);
+    CREATE TABLE IF NOT EXISTS users (uid TEXT PRIMARY KEY, display TEXT, balance NUMERIC DEFAULT 0, is_bot BOOLEAN DEFAULT false);
+    CREATE TABLE IF NOT EXISTS promotions (id SERIAL PRIMARY KEY, text TEXT, photo_url TEXT, target_type TEXT, group_id TEXT, interval_ms BIGINT, next_send_at BIGINT, last_sent_at BIGINT, active BOOLEAN DEFAULT true, created_at BIGINT);
+    CREATE TABLE IF NOT EXISTS notifications (id SERIAL PRIMARY KEY, uid TEXT, message TEXT, time BIGINT, read BOOLEAN DEFAULT false);
+    CREATE TABLE IF NOT EXISTS analytics (key TEXT PRIMARY KEY, value NUMERIC DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS all_winners (id SERIAL PRIMARY KEY, uid TEXT, display_name TEXT, card_id TEXT, prize NUMERIC, is_bot BOOLEAN, time BIGINT);
+  `);
+  console.log('✅ DB Tables ready!');
+}
+initDB();
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
 async function getState(key) {
   const r = await pool.query('SELECT value FROM game_state WHERE key=$1', [key]);
   return r.rows.length ? r.rows[0].value : null;
@@ -684,4 +701,4 @@ async function scheduleNextRound() {
     console.error('❌ scheduleNextRound error:', e.message);
     setTimeout(() => { if (autoModeOn) startAutoCountdown(); }, 15000);
   }
-            }
+  }
