@@ -7,11 +7,6 @@ const { Pool } = require('pg');
 
 const app = express();
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
-
 async function initDB() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS game_state (key TEXT PRIMARY KEY, value TEXT);
@@ -701,4 +696,4 @@ async function scheduleNextRound() {
     console.error('❌ scheduleNextRound error:', e.message);
     setTimeout(() => { if (autoModeOn) startAutoCountdown(); }, 15000);
   }
-  }
+                              }
