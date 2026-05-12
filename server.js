@@ -1,16 +1,19 @@
-const admin = require('firebase-admin');
-const express = require('express');
-const cors = require('cors');
-const app = express();
-const path = require('path');
-const https = require('https');
-const multer = require('multer');
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  databaseURL: "https://house-rent-app-3674a-default-rtdb.firebaseio.com/"
+const { Pool } = require('pg');
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
 });
-const db = admin.database();
+
+async function getState(key) {
+  const r = await pool.query('SELECT value FROM game_state WHERE key=$1', [key]);
+  return r.rows.length ? r.rows[0].value : null;
+}
+async function setState(key, value) {
+  await pool.query(
+    'INSERT INTO game_state(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2',
+    [key, JSON.stringify(value)]
+  );
+}
 
 app.use(cors({
   origin: '*',
@@ -110,17 +113,10 @@ app.post('/create-interval-promotion', multer({ storage: multer.memoryStorage() 
     }
 
     // Firebase push
-    const promoRef = db.ref('promotions').push();
-    await promoRef.set({
-      text: text || '',
-      photoUrl,
-      targetType: targetType || 'bot',
-      groupId: groupId || '',
-      intervalMs: Number(intervalMs) || 3600000,
-      nextSendAt: Date.now() + Number(intervalMs),
-      active: true,
-      createdAt: Date.now()
-    });
+    await pool.query(
+  'INSERT INTO promotions(text,photo_url,target_type,group_id,interval_ms,next_send_at,active,created_at) VALUES($1,$2,$3,$4,$5,$6,true,$7)',
+  [text||'', photoUrl, targetType||'bot', groupId||'', Number(intervalMs)||3600000, Date.now()+Number(intervalMs), Date.now()]
+);
 
     res.json({ ok: true, msg: '✅ Interval promotion ተጀምሯል!' });
   } catch(e) {
@@ -145,9 +141,8 @@ app.post('/send-promotion', multer({ storage: multer.memoryStorage() }).single('
 // photo → photoUrl (Cloudinary ወይም ሌላ) — buffer Firebase ላይ አይቀመጥም
 // HTML → Firebase push → server ያነብ → ሲልክ nextSendAt ያዘምናል
 
-function checkPromotions() {
-  db.ref('promotions').once('value', async (snap) => {
-    const promos = snap.val() || {};
+async function checkPromotions() {
+  const promos = (await pool.query('SELECT * FROM promotions WHERE active=true')).rows;
     const now = Date.now();
     for (let key in promos) {
       const p = promos[key];
@@ -165,8 +160,10 @@ function checkPromotions() {
           groupId: p.groupId || ''
         });
         // ቀጣዩ send time ያዘምናል
-        await db.ref(`promotions/${key}/nextSendAt`).set(now + (p.intervalMs || 3600000));
-        await db.ref(`promotions/${key}/lastSentAt`).set(now);
+          await pool.query(
+  'UPDATE promotions SET next_send_at=$1, last_sent_at=$2 WHERE id=$3',
+  [now + (p.intervalMs || 3600000), now, p.id]
+);
         console.log(`✅ Promotion sent! Next in ${(p.intervalMs||3600000)/3600000}h`);
       } catch(e) {
         console.error('❌ Promotion send error:', e.message);
@@ -185,30 +182,23 @@ app.post('/confirm-card', async (req, res) => {
   const { userId, cardId } = req.body;
   if (!userId || !cardId) return res.json({ ok: false, msg: 'Missing data' });
   try {
-    const betSnap = await db.ref('game/bet').get();
-    const bet = betSnap.val() || 0;
-    const balSnap = await db.ref('users/' + userId + '/balance').get();
-    const bal = balSnap.val() || 0;
+    const bet = (await getState('game/bet')) || 0;
+const balRes = await pool.query('SELECT balance FROM users WHERE uid=$1', [userId]);
+const bal = balRes.rows.length ? Number(balRes.rows[0].balance) : 0;
     if (bal < bet) return res.json({ ok: false, msg: '❌ Balance አንስተኛ ነው!' });
-    const statusSnap = await db.ref('game/status').get();
-    if (statusSnap.val()?.started) return res.json({ ok: false, msg: '❌ Game ጀምሯል!' });
-    const confSnap = await db.ref('game/confirmedNumbers').get();
-    const data = confSnap.val() || {};
-    const myCards = Object.values(data).filter(v => String(v) === String(userId));
-    if (myCards.length >= 5) return res.json({ ok: false, msg: '❌ Max 5 cards!' });
-    const cardRef = db.ref('game/confirmedNumbers/' + cardId);
-    const result = await cardRef.transaction(current => {
-      if (current !== null && current !== undefined) return;
-      return userId;
-    });
-    if (!result.committed) return res.json({ ok: false, msg: '❌ Card ተይዟል!' });
-    await db.ref('users/' + userId + '/balance').set(bal - bet);
-    const newConf = await db.ref('game/confirmedNumbers').get();
-    const total = Object.keys(newConf.val() || {}).length;
-    const pctSnap = await db.ref('game/percent').get();
-    const pct = (pctSnap.val() || 80) / 100;
-    await db.ref('game/prize').set(Math.floor(bet * total * pct));
-    await db.ref('game/total').set(bet * total);
+    const status = await getState('game/status');
+if (status?.started) return res.json({ ok: false, msg: '❌ Game ጀምሯል!' });
+  const allCards = (await getState('game/confirmedNumbers')) || {};
+const myCards = Object.values(allCards).filter(v => String(v) === String(userId));
+if (myCards.length >= 5) return res.json({ ok: false, msg: '❌ Max 5 cards!' });
+if (allCards[cardId]) return res.json({ ok: false, msg: '❌ Card ተይዟል!' });
+allCards[cardId] = userId;
+await setState('game/confirmedNumbers', allCards);
+await pool.query('UPDATE users SET balance = balance - $1 WHERE uid=$2', [bet, userId]);
+const total = Object.keys(allCards).length;
+const pct = (await getState('game/percent')) || 80;
+await setState('game/prize', Math.floor(bet * total * (pct/100)));
+await setState('game/total', bet * total);
     return res.json({ ok: true, msg: '✅ Card confirmed!' });
   } catch (e) {
     return res.json({ ok: false, msg: 'Error: ' + e.message });
@@ -292,31 +282,35 @@ function clearAllTimers() {
 }
 
 // ══ AUTO MODE ══
-db.ref('autoMode/on').on('value', async snap => {
-  const val = snap.val();
-  if (val === true && !autoModeOn) {
-    autoModeOn = true;
-    console.log('✅ Auto Mode ON');
-    const cdSnap = await db.ref('autoMode/cdMinutes').get();
-    autoCdMinutes = cdSnap.val() || 3;
-    const rSnap = await db.ref('autoMode/round').get();
-    roundNumber = rSnap.val() || 1;
-    startAutoCountdown();
-  } else if (val === false && autoModeOn) {
-    autoModeOn = false;
-    clearAllTimers();
-    await db.ref('autoMode/phase').set('idle');
-    console.log('⏹ Auto Mode OFF');
+// ── Auto Mode Polling ──
+setInterval(async () => {
+  try {
+    const val = await getState('autoMode/on');
+    if (val === true && !autoModeOn) {
+      autoModeOn = true;
+      console.log('✅ Auto Mode ON');
+      autoCdMinutes = (await getState('autoMode/cdMinutes')) || 3;
+      roundNumber = (await getState('autoMode/round')) || 1;
+      startAutoCountdown();
+    } else if (val === false && autoModeOn) {
+      autoModeOn = false;
+      clearAllTimers();
+      autoPhase = 'idle';
+      await setState('autoMode/phase', 'idle');
+      console.log('⏹ Auto Mode OFF');
+    }
+  } catch(e) {
+    console.error('❌ autoMode poll error:', e.message);
   }
-});
+}, 3000);
 
 async function startAutoCountdown() {
   if (!autoModeOn) return;
   clearAllTimers();
   const secs = autoCdMinutes * 60;
   const startAt = Date.now() + secs * 1000;
-  await db.ref('game/countdown').set({ active: true, startAt, mins: autoCdMinutes, autoStart: true });
-  await db.ref('autoMode/phase').set('countdown');
+  await setState('game/countdown', { active: true, startAt, mins: autoCdMinutes, autoStart: true });
+  await setState('autoMode/phase', 'countdown');
   console.log(`⏱ Countdown: ${autoCdMinutes} min`);
   let remain = secs;
   countdownTimer = setInterval(async () => {
@@ -330,127 +324,144 @@ async function startAutoGame() {
   if (!autoModeOn) return;
   try {
     calledNumbers = [];
-    await db.ref('game/countdown').set({ active: false });
-    await db.ref('game/status').set({ started: true, autoStarted: true });
-    await db.ref('game/calledNumbers').remove();
-    await db.ref('game/winners').remove();
-    await db.ref('game/pendingWinner').remove();
-    await db.ref('game/announcement').remove();
-    await db.ref('game/paid').set(false);
-    await db.ref('autoMode/phase').set('playing');
+    await setState('game/countdown', { active: false });
+    await setState('game/status', { started: true, autoStarted: true });
+    await setState('game/calledNumbers', []);
+    await setState('game/winners', null);
+    await setState('game/pendingWinner', null);
+    await setState('game/announcement', null);
+    await setState('game/paid', false);
+    await setState('autoMode/phase', 'playing');
     console.log('🎮 Game Started!');
-    const speedSnap = await db.ref('autoMode/callSpeed').get();
-    autoCallNumber(speedSnap.val() || 6000);
-  } catch (e) {
+    const callSpeed = (await getState('autoMode/callSpeed')) || 6000;
+    autoCallNumber(callSpeed);
+  } catch(e) {
     console.error('❌ startAutoGame error:', e.message);
-    await db.ref('autoMode/phase').set('error');
     setTimeout(() => { if (autoModeOn) startAutoCountdown(); }, 10000);
   }
 }
-
 async function autoCallNumber(speed) {
   if (!autoModeOn) return;
   clearInterval(callTimer);
 
-  const confSnap = await db.ref('game/confirmedNumbers').get();
-  const allCards = confSnap.val() || {};
-  const cardInfoMap = {}, realCards = [], botCards = [];
+  const allCards = (await getState('game/confirmedNumbers')) || {};
+  const usersSnap = await pool.query('SELECT uid, display, is_bot FROM users');
+  const allUsers = {};
+  usersSnap.rows.forEach(r => { allUsers[r.uid] = { display: r.display, is_bot: r.is_bot }; });
 
+  const cardInfoMap = {}, realCards = [], botCards = [];
   for (let cardId in allCards) {
     const uid = allCards[cardId];
-    const isBot = (await db.ref('users/' + uid + '/is_bot').get()).val() === true;
-    const name = (await db.ref('users/' + uid + '/display').get()).val() || String(uid);
+    const isBot = allUsers[uid]?.is_bot === true;
+    const name = allUsers[uid]?.display || String(uid);
     const entry = { user: uid, displayName: name, cardId, isBot };
     cardInfoMap[cardId] = entry;
-    if (isBot) botCards.push(entry); else realCards.push(entry);
+    if (isBot) botCards.push(entry);
+    else realCards.push(entry);
   }
 
-  const botWinPercent = Math.min(100, Math.max(0, (await db.ref('autoMode/botWinPercent').get()).val() ?? 50));
+  const botWinPercent = (await getState('autoMode/botWinPercent')) ?? 50;
   const roll = Math.floor(Math.random() * 100) + 1;
   let targetCard = null;
   if (roll <= botWinPercent) {
-    targetCard = botCards.length > 0 ? botCards[Math.floor(Math.random() * botCards.length)]
-      : realCards.length > 0 ? realCards[Math.floor(Math.random() * realCards.length)] : null;
+    targetCard = botCards.length > 0
+      ? botCards[Math.floor(Math.random() * botCards.length)]
+      : realCards.length > 0
+        ? realCards[Math.floor(Math.random() * realCards.length)] : null;
   } else {
-    targetCard = realCards.length > 0 ? realCards[Math.floor(Math.random() * realCards.length)]
-      : botCards.length > 0 ? botCards[Math.floor(Math.random() * botCards.length)] : null;
+    targetCard = realCards.length > 0
+      ? realCards[Math.floor(Math.random() * realCards.length)]
+      : botCards.length > 0
+        ? botCards[Math.floor(Math.random() * botCards.length)] : null;
   }
 
-  if (!targetCard) { console.log('⚠️ No cards'); await scheduleNextRound(); return; }
+  if (!targetCard) {
+    console.log('⚠️ No cards');
+    await scheduleNextRound();
+    return;
+  }
 
   const neededNums = generateBoard(Number(targetCard.cardId)).filter(n => n !== 'FREE');
   const allBoards = {};
-  for (let cardId in cardInfoMap) allBoards[cardId] = generateBoard(Number(cardId));
+  for (let cardId in cardInfoMap)
+    allBoards[cardId] = generateBoard(Number(cardId));
+
+  const gameTotal = (await getState('game/total')) || 0;
+  const gamePct = (await getState('game/percent')) || 80;
 
   callTimer = setInterval(async () => {
     try {
       if (!autoModeOn) { clearInterval(callTimer); return; }
-      const pend = (await db.ref('game/pendingWinner').get()).val();
-      if (pend && !pend.announced) { clearInterval(callTimer); startAutoAnnounce(); return; }
+
+      const pend = await getState('game/pendingWinner');
+      if (pend && !pend.announced) {
+        clearInterval(callTimer);
+        startAutoAnnounce();
+        return;
+      }
 
       const used = new Set(calledNumbers);
       const remaining = [...Array(75)].map((_, i) => i + 1).filter(n => !used.has(n));
 
       if (!remaining.length) {
         clearInterval(callTimer);
-        const bet = (await db.ref('game/bet').get()).val() || 0;
+        // ሁሉም ሳይጠናቀቅ — ገንዘብ መልስ
         for (let cardId in allCards) {
           const uid = allCards[cardId];
-          if ((await db.ref('users/' + uid + '/is_bot').get()).val() === true) continue;
-          const uRef = db.ref('users/' + uid + '/balance');
-          await uRef.set(((await uRef.get()).val() || 0) + bet);
-          await db.ref('notifications/' + uid).set({ message: `⚠️ Game ሳይጠናቀቅ ተዘጋ — ${bet} ብር ተመለሰ!`, time: Date.now(), read: false });
+          if (allUsers[uid]?.is_bot) continue;
+          const bet = (await getState('game/bet')) || 0;
+          await pool.query('UPDATE users SET balance = balance + $1 WHERE uid=$2', [bet, uid]);
+          await pool.query('INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
+            [uid, `⚠️ Game ሳይጠናቀቅ ተዘጋ — ${bet} ብር ተመለሰ!`, Date.now()]);
         }
-        await db.ref('game/announcement').set({ type: 'no_winner', message: 'ምንም አሸናፊ አልተገኘም', time: Date.now() });
+        await setState('game/announcement', { type: 'no_winner', message: 'ምንም አሸናፊ አልተገኘም', time: Date.now() });
         await scheduleNextRound();
         return;
       }
 
       const neededRemaining = remaining.filter(n => neededNums.includes(n) && !calledNumbers.includes(n));
       let safeRemaining = remaining.filter(n => !wouldCloseColumnSoon(n, allBoards, calledNumbers));
-      if (safeRemaining.length === 0) {
-        safeRemaining = remaining;
-        console.log('⚠️ All remaining numbers close columns — skipping column filter');
-      }
+      if (safeRemaining.length === 0) safeRemaining = remaining;
       const safeNeeded = neededRemaining.filter(n => safeRemaining.includes(n));
 
       let n;
       const rand = Math.random();
-      if (safeNeeded.length > 0 && rand < 0.65) {
+      if (safeNeeded.length > 0 && rand < 0.65)
         n = safeNeeded[Math.floor(Math.random() * safeNeeded.length)];
-      } else if (safeRemaining.length > 0) {
+      else if (safeRemaining.length > 0)
         n = safeRemaining[Math.floor(Math.random() * safeRemaining.length)];
-      } else {
+      else
         n = remaining[Math.floor(Math.random() * remaining.length)];
-      }
 
       calledNumbers.push(n);
-      await db.ref('game/calledNumbers').push(n);
-      console.log(`📢 ${getLetter(n)}${n} (called: ${calledNumbers.length})`);
+      const called = (await getState('game/calledNumbers')) || [];
+      called.push(n);
+      await setState('game/calledNumbers', called);
+      console.log(`📢 ${getLetter(n)}${n}`);
 
-      const prize = Math.floor(((await db.ref('game/total').get()).val() || 0) * (((await db.ref('game/percent').get()).val() || 80) / 100));
-      await db.ref('game/prize').set(prize);
+      const prize = Math.floor(gameTotal * (gamePct / 100));
+      await setState('game/prize', prize);
 
       const winners = [];
-      for (let cardId in allBoards) {
+      for (let cardId in allBoards)
         if (checkWin(allBoards[cardId], calledNumbers))
           winners.push({ ...cardInfoMap[cardId], time: Date.now() });
-      }
 
       if (winners.length > 0) {
         clearInterval(callTimer);
-        console.log(`🏆 Winner found after ${calledNumbers.length} calls!`);
-        await db.ref('game/pendingWinner').set({ winners, prize, announced: false, time: Date.now() });
+        console.log(`🏆 Winner! after ${calledNumbers.length} calls`);
+        await setState('game/pendingWinner', { winners, prize, announced: false, time: Date.now() });
         startAutoAnnounce();
       }
-    } catch (e) { console.error('❌ callNumber error:', e.message); }
+    } catch(e) {
+      console.error('❌ callNumber error:', e.message);
+    }
   }, speed);
 }
-
 async function startAutoAnnounce() {
   if (!autoModeOn) return;
   clearAllTimers();
-  await db.ref('autoMode/phase').set('announcing');
+  await setState('autoMode/phase', 'announcing');
   let count = 5;
   announceTimer = setInterval(async () => {
     if (--count <= 0) { clearInterval(announceTimer); await announceWinner(); await scheduleNextRound(); }
@@ -459,7 +470,7 @@ async function startAutoAnnounce() {
 
 async function announceWinner() {
   try {
-    const data = (await db.ref('game/pendingWinner').get()).val();
+    const data = await getState('game/pendingWinner');
     if (!data) return;
     const { winners, prize } = data;
     const share = Math.floor(prize / winners.length);
@@ -467,36 +478,35 @@ async function announceWinner() {
 
     for (let w of winners) {
       if (w.isBot) { botWinShare += share; continue; }
-      const uRef = db.ref('users/' + w.user + '/balance');
-      await uRef.set(((await uRef.get()).val() || 0) + share);
-      await db.ref('notifications/' + w.user).set({ message: `🎉 አሸነፍክ! ${share} ብር balance ላይ ታከለ! Card #${w.cardId}`, time: Date.now(), read: false });
-      await db.ref('analytics/totalProfit').set(Math.max(0, ((await db.ref('analytics/totalProfit').get()).val() || 0) - share));
-    }
+      await pool.query('UPDATE users SET balance = balance + $1 WHERE uid=$2', [share, w.user]);
+await pool.query('INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
+  [w.user, `🎉 አሸነፍክ! ${share} ብር balance ላይ ታከለ! Card #${w.cardId}`, Date.now()]);
+   await pool.query('UPDATE analytics SET value = GREATEST(0, value - $1) WHERE key=$2',
+  [share, 'totalProfit']);
+    }  // ← ይህን ጨምሩ!
 
     if (botWinShare > 0) {
-      await db.ref('analytics/totalProfit').set(((await db.ref('analytics/totalProfit').get()).val() || 0) + botWinShare);
-      await db.ref('analytics/botWinProfit').set(((await db.ref('analytics/botWinProfit').get()).val() || 0) + botWinShare);
+      await pool.query('INSERT INTO analytics(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value = analytics.value + $2', ['totalProfit', botWinShare]);
+      await pool.query('INSERT INTO analytics(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value = analytics.value + $2', ['botWinProfit', botWinShare]);
     }
-
     const winnersObj = {};
     winners.forEach((w, i) => { winnersObj[i] = { ...w, prize: share }; });
-    await db.ref('game/winners').set(winnersObj);
-    for (const w of winners) await db.ref('allWinners').push({ user: w.user, displayName: w.displayName, cardId: w.cardId, prize: share, isBot: w.isBot || false, time: Date.now() });
-
-    await db.ref('game/announcement').set({ type: 'winner', winners, prize, share, time: Date.now() });
-    await db.ref('game/paid').set(true);
-    await db.ref('game/pendingWinner/announced').set(true);
-    await db.ref('game/status').set({ started: false, waitingRestart: true });
-
-    const confSnap = await db.ref('game/confirmedNumbers').get();
-    const playerCount = new Set(Object.values(confSnap.val() || {})).size;
-    const total = (await db.ref('game/total').get()).val() || 0;
-    await db.ref('analytics/totalCollected').set(((await db.ref('analytics/totalCollected').get()).val() || 0) + total);
-    await db.ref('analytics/totalPaidOut').set(((await db.ref('analytics/totalPaidOut').get()).val() || 0) + prize);
-    const prevAvg = (await db.ref('analytics/avgPlayers').get()).val() || 0;
-    await db.ref('analytics/avgPlayers').set(((prevAvg * (roundNumber - 1)) + playerCount) / roundNumber);
-    await db.ref('analytics/dailyProfit').set(((await db.ref('analytics/dailyProfit').get()).val() || 0) + botWinShare);
-    await db.ref('analytics/dailyRound').set(roundNumber);
+    await setState('game/winners', winnersObj);
+for (const w of winners) {
+  await pool.query('INSERT INTO all_winners(uid,display_name,card_id,prize,is_bot,time) VALUES($1,$2,$3,$4,$5,$6)',
+    [w.user, w.displayName, w.cardId, share, w.isBot||false, Date.now()]);
+}
+await setState('game/announcement', { type:'winner', winners, prize, share, time:Date.now() });
+await setState('game/paid', true);
+await setState('game/pendingWinner', { ...data, announced:true });
+await setState('game/status', { started:false, waitingRestart:true });
+const allCards = (await getState('game/confirmedNumbers')) || {};
+const playerCount = new Set(Object.values(allCards)).size;
+const total = (await getState('game/total')) || 0;
+await pool.query('INSERT INTO analytics(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value = analytics.value + $2', ['totalCollected', total]);
+await pool.query('INSERT INTO analytics(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value = analytics.value + $2', ['totalPaidOut', prize]);
+await pool.query('INSERT INTO analytics(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value = analytics.value + $2', ['dailyProfit', botWinShare]);
+await setState('analytics/dailyRound', roundNumber);
     console.log(`✅ Paid! ${share} ብር to ${winners.length} winner(s)`);
   } catch (e) { console.error('❌ announceWinner error:', e.message); }
 }
@@ -633,51 +643,37 @@ async function scheduleNextRound() {
   if (!autoModeOn) return;
   try {
     const todayStr = new Date().toISOString().split('T')[0];
-    const lastReset = (await db.ref('analytics/lastResetDate').get()).val();
+    const lastReset = await getState('analytics/lastResetDate');
 
     if (lastReset !== todayStr) {
-      const prevRound = (await db.ref('analytics/dailyRound').get()).val() || 0;
-      const prevProfit = (await db.ref('analytics/dailyProfit').get()).val() || 0;
-      if (prevRound > 0 && lastReset)
-        await db.ref('analytics/history/' + lastReset).set({ date: lastReset, rounds: prevRound, profit: prevProfit });
-      await db.ref('analytics/dailyRound').set(0);
-      await db.ref('analytics/dailyProfit').set(0);
-      await db.ref('analytics/lastResetDate').set(todayStr);
+      await setState('analytics/dailyRound', 0);
+      await setState('analytics/dailyProfit', 0);
+      await setState('analytics/lastResetDate', todayStr);
       roundNumber = 1;
-      await db.ref('autoMode/round').set(roundNumber);
+      await setState('autoMode/round', roundNumber);
       console.log('🔄 Daily Reset:', todayStr);
-
-      const fiveDaysAgo = new Date(Date.now() - 5*24*60*60*1000).toISOString().split('T')[0];
-      const histData = (await db.ref('analytics/history').get()).val() || {};
-      for (let date in histData) if (date < fiveDaysAgo) await db.ref('analytics/history/' + date).remove();
-      const fiveMs = Date.now() - 5*24*60*60*1000;
-      const awData = (await db.ref('allWinners').get()).val() || {};
-      for (let key in awData) if ((awData[key].time || 0) < fiveMs) await db.ref('allWinners/' + key).remove();
     }
 
     roundNumber++;
-    await db.ref('autoMode/round').set(roundNumber);
-    console.log(`🔄 Round ${roundNumber}`);
-
-    await db.ref('game/calledNumbers').remove();
-    await db.ref('game/status').set({ started: false });
-    await db.ref('game/pendingWinner').remove();
-    await db.ref('game/winners').set(null);
-    await db.ref('game/announcement').remove();
-    await db.ref('game/paid').set(false);
-    await db.ref('game/confirmedNumbers').remove();
-    await db.ref('game/prize').set(0);
-    await db.ref('game/total').set(0);
+    await setState('autoMode/round', roundNumber);
+    await setState('game/calledNumbers', []);
+    await setState('game/status', { started: false });
+    await setState('game/pendingWinner', null);
+    await setState('game/winners', null);
+    await setState('game/announcement', null);
+    await setState('game/paid', false);
+    await setState('game/confirmedNumbers', {});
+    await setState('game/prize', 0);
+    await setState('game/total', 0);
     calledNumbers = [];
 
-    const usersData = (await db.ref('users').get()).val() || {};
-    for (let uid in usersData)
-      if (usersData[uid]?.is_bot) await db.ref('users/' + uid).remove();
+    await pool.query('DELETE FROM users WHERE is_bot = true');
 
-    await db.ref('autoMode/phase').set('countdown');
-    setTimeout(async () => { if (!autoModeOn) return; await startAutoCountdown(); }, 3000);
-  } catch (e) {
+    await setState('autoMode/phase', 'countdown');
+    setTimeout(async () => { if (autoModeOn) await startAutoCountdown(); }, 3000);
+  } catch(e) {
     console.error('❌ scheduleNextRound error:', e.message);
     setTimeout(() => { if (autoModeOn) startAutoCountdown(); }, 15000);
   }
 }
+               }
