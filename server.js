@@ -167,11 +167,12 @@ async function checkPromotions() {
         console.log(`✅ Promotion sent! Next in ${(p.intervalMs||3600000)/3600000}h`);
       } catch(e) {
         console.error('❌ Promotion send error:', e.message);
-        // error ቢሆን ደሞ interval ቆጥሮ ይሞክራል
-        await db.ref(`promotions/${key}/nextSendAt`).set(now + (p.intervalMs || 3600000));
+        await pool.query(
+          'UPDATE promotions SET next_send_at=$1 WHERE id=$2',
+          [now + (p.intervalMs || 3600000), p.id]
+        );
       }
     }
-  });
 }
 
 setInterval(checkPromotions, 60 * 1000);
@@ -676,4 +677,4 @@ async function scheduleNextRound() {
     setTimeout(() => { if (autoModeOn) startAutoCountdown(); }, 15000);
   }
 }
-               }
+                          }
