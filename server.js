@@ -164,7 +164,7 @@ app.get('/tts/number/:n', async (req, res) => {
     res.status(500).json({ error: 'TTS failed' });
   }
 });
-app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
+
 // GET /game-state — ሁሉንም state ያስቀምጣል
 app.get('/game-state', async (req, res) => {
   try {
@@ -1093,3 +1093,4 @@ setTimeout(async () => {
     console.error('❌ Restore error:', e.message);
   }
 }, 3000);
+app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
