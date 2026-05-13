@@ -61,7 +61,7 @@ app.post('/set-not-new', async (req, res) => {
 app.get('/all-winners', async (req, res) => {
   try {
     const r = await pool.query(
-      'SELECT * FROM all_winners ORDER BY time DESC LIMIT 100'
+      'SELECT uid as user, display_name as "displayName", card_id as "cardId", prize, time FROM all_winners ORDER BY time DESC LIMIT 100'
     );
     const round = (await getState('autoMode/round')) || 1;
     res.json({ winners: r.rows, round });
@@ -123,18 +123,23 @@ app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
 app.get('/game-state', async (req, res) => {
   try {
     const rows = await pool.query('SELECT key, value FROM game_state');
-    const state = {};
+    const result = {};
     rows.rows.forEach(r => {
       const keys = r.key.split('/');
-      let obj = state;
-      for (let i = 0; i < keys.length - 1; i++) {
-        if (!obj[keys[i]]) obj[keys[i]] = {};
+      let obj = result;
+      for(let i = 0; i < keys.length - 1; i++){
+        if(!obj[keys[i]]) obj[keys[i]] = {};
         obj = obj[keys[i]];
       }
       try { obj[keys[keys.length-1]] = JSON.parse(r.value); }
       catch { obj[keys[keys.length-1]] = r.value; }
     });
-    res.json(state);
+    // ✅ game/ ን flatten አድርግ
+    const flat = result.game || {};
+    flat.autoMode = result.autoMode;
+    flat.smartBot = result.smartBot;
+    flat.settings = result.settings;
+    res.json(flat);
   } catch(e) { res.json({}); }
 });
 
