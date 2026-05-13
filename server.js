@@ -177,6 +177,12 @@ app.post('/change-agent-pass', async (req, res) => {
     res.json({ ok: true });
   } catch(e) { res.json({ ok: false }); }
 });
+app.post('/remove-bots', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM users WHERE is_bot = true');
+    res.json({ ok: true });
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
+});
 // ══ CLOUDINARY SOUNDS ══
 const CLOUDINARY_CLOUD = 'diado1bxi';
 const CLOUDINARY_API_KEY = '117446111831141';
@@ -847,4 +853,4 @@ async function scheduleNextRound() {
     console.error('❌ scheduleNextRound error:', e.message);
     setTimeout(() => { if (autoModeOn) startAutoCountdown(); }, 15000);
   }
-              }
+        }
