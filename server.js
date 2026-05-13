@@ -140,6 +140,30 @@ function broadcast(data) {
     client.write(`data: ${JSON.stringify(data)}\n\n`);
   });
 }
+// ══ TTS PROXY ══
+const SOUNDS_SERVER = 'https://game-production-7f86.up.railway.app';
+
+app.get('/tts/number/:n', async (req, res) => {
+  const n = parseInt(req.params.n);
+  if (isNaN(n) || n < 1 || n > 75)
+    return res.status(400).json({ error: 'Invalid number' });
+  
+  try {
+    const response = await new Promise((resolve, reject) => {
+      https.get(`${SOUNDS_SERVER}/tts/number/${n}`, (r) => {
+        const chunks = [];
+        r.on('data', chunk => chunks.push(chunk));
+        r.on('end', () => resolve({ buffer: Buffer.concat(chunks), type: r.headers['content-type'] }));
+        r.on('error', reject);
+      }).on('error', reject);
+    });
+    
+    res.set('Content-Type', 'audio/mpeg');
+    res.send(response.buffer);
+  } catch(e) {
+    res.status(500).json({ error: 'TTS failed' });
+  }
+});
 app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
 // GET /game-state — ሁሉንም state ያስቀምጣል
 app.get('/game-state', async (req, res) => {
