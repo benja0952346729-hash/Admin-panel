@@ -37,7 +37,146 @@ app.use(express.static(__dirname));
 app.use(express.json());
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
+// GET /game-state — ሁሉንም state ያስቀምጣል
+app.get('/game-state', async (req, res) => {
+  try {
+    const rows = await pool.query('SELECT key, value FROM game_state');
+    const state = {};
+    rows.rows.forEach(r => {
+      const keys = r.key.split('/');
+      let obj = state;
+      for (let i = 0; i < keys.length - 1; i++) {
+        if (!obj[keys[i]]) obj[keys[i]] = {};
+        obj = obj[keys[i]];
+      }
+      try { obj[keys[keys.length-1]] = JSON.parse(r.value); }
+      catch { obj[keys[keys.length-1]] = r.value; }
+    });
+    res.json(state);
+  } catch(e) { res.json({}); }
+});
 
+// POST /set-state — key/value ያስቀምጣል
+app.post('/set-state', async (req, res) => {
+  try {
+    const { key, value } = req.body;
+    await setState(key, value);
+    res.json({ ok: true });
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
+});
+
+// GET /analytics
+app.get('/analytics', async (req, res) => {
+  try {
+    const rows = await pool.query('SELECT key, value FROM analytics');
+    const data = {};
+    rows.rows.forEach(r => data[r.key] = Number(r.value));
+    res.json(data);
+  } catch(e) { res.json({}); }
+});
+
+// GET /withdrawals
+app.get('/withdrawals', async (req, res) => {
+  try {
+    const r = await pool.query("SELECT value FROM game_state WHERE key='bot/withdrawals'");
+    const data = r.rows.length ? JSON.parse(r.rows[0].value) : {};
+    res.json({ withdrawals: data });
+  } catch(e) { res.json({ withdrawals: {} }); }
+});
+
+// GET /agents
+app.get('/agents', async (req, res) => {
+  try {
+    const r = await pool.query("SELECT value FROM game_state WHERE key='agents'");
+    const data = r.rows.length ? JSON.parse(r.rows[0].value) : {};
+    res.json(data);
+  } catch(e) { res.json({}); }
+});
+
+// GET /promotions-list
+app.get('/promotions-list', async (req, res) => {
+  try {
+    const rows = await pool.query('SELECT * FROM promotions WHERE active=true ORDER BY created_at DESC');
+    res.json(rows.rows);
+  } catch(e) { res.json([]); }
+});
+
+// DELETE /promotions/:id
+app.post('/delete-promotion', async (req, res) => {
+  try {
+    const { id } = req.body;
+    await pool.query('UPDATE promotions SET active=false WHERE id=$1', [id]);
+    res.json({ ok: true });
+  } catch(e) { res.json({ ok: false }); }
+});
+
+// POST /give-balance
+app.post('/give-balance', async (req, res) => {
+  try {
+    const { uid, amount } = req.body;
+    await pool.query('INSERT INTO users(uid,display,balance) VALUES($1,$2,$3) ON CONFLICT(uid) DO UPDATE SET balance=users.balance+$3', [uid, uid, amount]);
+    res.json({ ok: true });
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
+});
+
+// POST /save-accounts
+app.post('/save-accounts', async (req, res) => {
+  try {
+    const { cbe, telebirr } = req.body;
+    if(cbe) await setState('bot/settings/cbe_account', cbe);
+    if(telebirr) await setState('bot/settings/telebirr_account', telebirr);
+    res.json({ ok: true });
+  } catch(e) { res.json({ ok: false }); }
+});
+
+// POST /withdrawal-action
+app.post('/withdrawal-action', async (req, res) => {
+  try {
+    const { key, action, uid, amount } = req.body;
+    const allWd = JSON.parse((await pool.query("SELECT value FROM game_state WHERE key='bot/withdrawals'")).rows[0]?.value || '{}');
+    if(!allWd[key]) return res.json({ ok: false, msg: 'Not found' });
+    allWd[key].status = action === 'approve' ? 'approved' : 'rejected';
+    await setState('bot/withdrawals', allWd);
+    if(action === 'approve') {
+      await pool.query('UPDATE analytics SET value=value+$1 WHERE key=$2', [amount, 'totalWithdrawals']);
+      await pool.query('UPDATE analytics SET value=GREATEST(0,value-$1) WHERE key=$2', [amount, 'totalProfit']);
+      await pool.query('INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)', [uid, `✅ ${amount} ብር ተልኳል!`, Date.now()]);
+    } else {
+      await pool.query('UPDATE users SET balance=balance+$1 WHERE uid=$2', [amount, uid]);
+      await pool.query('INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)', [uid, `❌ Withdrawal rejected — ${amount} ብር ተመለሰ!`, Date.now()]);
+    }
+    res.json({ ok: true });
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
+});
+
+// POST /add-agent, /delete-agent, /change-agent-pass
+app.post('/add-agent', async (req, res) => {
+  try {
+    const { name, id_number } = req.body;
+    const agents = JSON.parse((await pool.query("SELECT value FROM game_state WHERE key='agents'")).rows[0]?.value || '{}');
+    agents[name] = { id_number };
+    await setState('agents', agents);
+    res.json({ ok: true });
+  } catch(e) { res.json({ ok: false }); }
+});
+
+app.post('/delete-agent', async (req, res) => {
+  try {
+    const { name } = req.body;
+    const agents = JSON.parse((await pool.query("SELECT value FROM game_state WHERE key='agents'")).rows[0]?.value || '{}');
+    delete agents[name];
+    await setState('agents', agents);
+    res.json({ ok: true });
+  } catch(e) { res.json({ ok: false }); }
+});
+
+app.post('/change-agent-pass', async (req, res) => {
+  try {
+    const { password } = req.body;
+    await setState('settings/agent_password', password);
+    res.json({ ok: true });
+  } catch(e) { res.json({ ok: false }); }
+});
 // ══ CLOUDINARY SOUNDS ══
 const CLOUDINARY_CLOUD = 'diado1bxi';
 const CLOUDINARY_API_KEY = '117446111831141';
@@ -78,7 +217,26 @@ async function loadCloudinarySounds() {
     req.end();
   });
 }
+app.get('/get-config', async (req, res) => {
+  try {
+    const r = await pool.query("SELECT value FROM game_state WHERE key='adminConfig'");
+    const config = r.rows.length ? JSON.parse(r.rows[0].value) : {loginPassword:'1234', settingsPassword:'9999'};
+    res.json(config);
+  } catch(e) {
+    res.json({loginPassword:'1234', settingsPassword:'9999'});
+  }
+});
 
+app.post('/save-config', async (req, res) => {
+  try {
+    const { loginPassword, settingsPassword } = req.body;
+    const config = { loginPassword, settingsPassword };
+    await pool.query("INSERT INTO game_state(key,value) VALUES('adminConfig',$1) ON CONFLICT(key) DO UPDATE SET value=$1", [JSON.stringify(config)]);
+    res.json({ ok: true });
+  } catch(e) {
+    res.json({ ok: false, msg: e.message });
+  }
+});
 app.get('/sounds-map', (req, res) => res.json(soundsMap));
 loadCloudinarySounds();
 app.post('/create-interval-promotion', multer({ storage: multer.memoryStorage() }).single('photo'), async (req, res) => {
@@ -689,4 +847,4 @@ async function scheduleNextRound() {
     console.error('❌ scheduleNextRound error:', e.message);
     setTimeout(() => { if (autoModeOn) startAutoCountdown(); }, 15000);
   }
-  }
+              }
