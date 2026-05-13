@@ -939,12 +939,12 @@ async function scheduleNextRound() {
     await setState('autoMode/round', roundNumber);
     await setState('game/calledNumbers', []);
     await setState('game/status', { started: false });
-    await setState('game/pendingWinner', null);
     await setState('game/winners', null);
-    // announcement 8 ሰኮንድ ቆይቶ ይጠፋ
+// pendingWinner እና announcement 10 ሰኮንድ ቆይተው ይጠፋሉ
 setTimeout(async () => {
+  await setState('game/pendingWinner', null);
   await setState('game/announcement', null);
-}, 8000);
+}, 10000);
     await setState('game/paid', false);
     await setState('game/confirmedNumbers', {});
     await setState('game/prize', 0);
