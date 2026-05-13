@@ -1036,12 +1036,7 @@ setTimeout(async () => {
       roundNumber = (await getState('autoMode/round')) || 1;
       const gameStatus = await getState('game/status');
       if (gameStatus?.started) {
-        // ✅ Game ጀምሮ ሳለ restart ሆነ — cards አትጥፋ፣ game ቀጥል
-        console.log('🔄 Game was running — continuing...');
-        const callSpeed = (await getState('autoMode/callSpeed')) || 6000;
-        const savedCalled = (await getState('game/calledNumbers')) || [];
-        calledNumbers = Array.isArray(savedCalled) ? savedCalled : Object.values(savedCalled);
-        await autoCallNumber(callSpeed);
+        await scheduleNextRound();
       } else {
         await startAutoCountdown();
       }
