@@ -470,7 +470,7 @@ setInterval(async () => {
       autoCdMinutes = (await getState('autoMode/cdMinutes')) || 3;
       roundNumber = (await getState('autoMode/round')) || 1;
       startAutoCountdown();
-    } else if (val === false && autoModeOn) {
+    } else if (!val && autoModeOn) {
       autoModeOn = false;
       clearAllTimers();
       autoPhase = 'idle';
@@ -853,4 +853,4 @@ async function scheduleNextRound() {
     console.error('❌ scheduleNextRound error:', e.message);
     setTimeout(() => { if (autoModeOn) startAutoCountdown(); }, 15000);
   }
-        }
+}
