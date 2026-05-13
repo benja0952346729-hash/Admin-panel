@@ -43,11 +43,11 @@ app.get('/user-state', async (req, res) => {
   if (!userId) return res.json({ balance: 0, isNew: false });
   try {
     const insert = await pool.query(
-      `INSERT INTO users(uid,display,balance,is_bot)
-       VALUES($1,$1,0,false)
-       ON CONFLICT(uid) DO NOTHING RETURNING uid`,
-      [userId]
-    );
+  `INSERT INTO users(uid,display,balance,is_bot)
+   VALUES($1,$2,0,false)
+   ON CONFLICT(uid) DO UPDATE SET display=$2 RETURNING uid`,
+  [userId, displayName]
+);
     const isNew = insert.rows.length > 0;
     if (isNew) {
       await pool.query('UPDATE users SET balance=balance+20 WHERE uid=$1', [userId]);
@@ -140,6 +140,17 @@ app.get('/game-state', async (req, res) => {
     flat.autoMode = result.autoMode;
     flat.smartBot = result.smartBot;
     flat.settings = result.settings;
+    flat.announcement = result.game?.announcement;
+flat.winners = result.game?.winners;
+flat.pendingWinner = result.game?.pendingWinner;
+flat.status = result.game?.status;
+flat.calledNumbers = result.game?.calledNumbers;
+flat.countdown = result.game?.countdown;
+flat.bet = result.game?.bet;
+flat.prize = result.game?.prize;
+flat.percent = result.game?.percent;
+flat.confirmedNumbers = result.game?.confirmedNumbers;
+flat.paid = result.game?.paid;
     const usersRes = await pool.query('SELECT uid, display FROM users');
 const displayNames = {};
 usersRes.rows.forEach(r => { displayNames[r.uid] = r.display; });
