@@ -13,13 +13,13 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-pool.query(`CREATE TABLE IF NOT EXISTS game_state (key TEXT PRIMARY KEY, value TEXT); CREATE TABLE IF NOT EXISTS users (uid TEXT PRIMARY KEY, display TEXT, balance NUMERIC DEFAULT 0, is_bot BOOLEAN DEFAULT false); CREATE TABLE IF NOT EXISTS promotions (id SERIAL PRIMARY KEY, text TEXT, photo_url TEXT, target_type TEXT, group_id TEXT, interval_ms BIGINT, next_send_at BIGINT, last_sent_at BIGINT, active BOOLEAN DEFAULT true, created_at BIGINT); CREATE TABLE IF NOT EXISTS notifications (id SERIAL PRIMARY KEY, uid TEXT, message TEXT, time BIGINT, read BOOLEAN DEFAULT false); CREATE TABLE IF NOT EXISTS analytics (key TEXT PRIMARY KEY, value NUMERIC DEFAULT 0); CREATE TABLE IF NOT EXISTS all_winners (id SERIAL PRIMARY KEY, uid TEXT, display_name TEXT, card_id TEXT, prize NUMERIC, is_bot BOOLEAN, time BIGINT);`).then(() => console.log('✅ DB ready!')).catch(e => console.error('DB error:', e.message));
-
-pool.query(`CREATE TABLE IF NOT EXISTS game_state (key TEXT PRIMARY KEY, value TEXT); CREATE TABLE IF NOT EXISTS users (uid TEXT PRIMARY KEY, display TEXT, balance NUMERIC DEFAULT 0, is_bot BOOLEAN DEFAULT false); CREATE TABLE IF NOT EXISTS promotions (id SERIAL PRIMARY KEY, text TEXT, photo_url TEXT, target_type TEXT, group_id TEXT, interval_ms BIGINT, next_send_at BIGINT, last_sent_at BIGINT, active BOOLEAN DEFAULT true, created_at BIGINT); CREATE TABLE IF NOT EXISTS notifications (id SERIAL PRIMARY KEY, uid TEXT, message TEXT, time BIGINT, read BOOLEAN DEFAULT false); CREATE TABLE IF NOT EXISTS analytics (key TEXT PRIMARY KEY, value NUMERIC DEFAULT 0); CREATE TABLE IF NOT EXISTS all_winners (id SERIAL PRIMARY KEY, uid TEXT, display_name TEXT, card_id TEXT, prize NUMERIC, is_bot BOOLEAN, time BIGINT);`).then(() => console.log('✅ DB ready!')).catch(e => console.error('DB error:', e.message));
+pool.query(`CREATE TABLE IF NOT EXISTS game_state (key TEXT PRIMARY KEY, value TEXT); CREATE TABLE IF NOT EXISTS users (uid TEXT PRIMARY KEY, display TEXT, balance NUMERIC DEFAULT 0, is_bot BOOLEAN DEFAULT false); CREATE TABLE IF NOT EXISTS promotions (id SERIAL PRIMARY KEY, text TEXT, photo_url TEXT, target_type TEXT, group_id TEXT, interval_ms BIGINT, next_send_at BIGINT, last_sent_at BIGINT, active BOOLEAN DEFAULT true, created_at BIGINT); CREATE TABLE IF NOT EXISTS notifications (id SERIAL PRIMARY KEY, uid TEXT, message TEXT, time BIGINT, read BOOLEAN DEFAULT false); CREATE TABLE IF NOT EXISTS analytics (key TEXT PRIMARY KEY, value NUMERIC DEFAULT 0); CREATE TABLE IF NOT EXISTS all_winners (id SERIAL PRIMARY KEY, uid TEXT, display_name TEXT, card_id TEXT, prize NUMERIC, is_bot BOOLEAN, time BIGINT);`)
+.then(() => console.log('✅ DB ready!'))
+.catch(e => console.error('DB error:', e.message));
 
 async function getState(key) {
   const r = await pool.query('SELECT value FROM game_state WHERE key=$1', [key]);
-  return r.rows.length ? r.rows[0].value : null;
+  return r.rows.length ? JSON.parse(r.rows[0].value) : null;
 }
 async function setState(key, value) {
   await pool.query(
@@ -854,3 +854,22 @@ async function scheduleNextRound() {
     setTimeout(() => { if (autoModeOn) startAutoCountdown(); }, 15000);
   }
 }
+setTimeout(async () => {
+  try {
+    const autoOn = await getState('autoMode/on');
+    if (autoOn === true) {
+      console.log('🔄 Restoring auto mode after restart...');
+      autoModeOn = true;
+      autoCdMinutes = (await getState('autoMode/cdMinutes')) || 3;
+      roundNumber = (await getState('autoMode/round')) || 1;
+      const gameStatus = await getState('game/status');
+      if (gameStatus?.started) {
+        await scheduleNextRound();
+      } else {
+        await startAutoCountdown();
+      }
+    }
+  } catch(e) {
+    console.error('❌ Restore error:', e.message);
+  }
+}, 3000);
