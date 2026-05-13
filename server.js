@@ -357,7 +357,6 @@ app.post('/create-interval-promotion', multer({ storage: multer.memoryStorage() 
   try {
     let photoUrl = '';
     
-    // Photo ካለ Cloudinary upload
     if (photoBuffer) {
       const auth = Buffer.from(`${CLOUDINARY_API_KEY}:${CLOUDINARY_API_SECRET}`).toString('base64');
       const boundary = '----FormBoundary' + Date.now();
@@ -392,7 +391,6 @@ app.post('/create-interval-promotion', multer({ storage: multer.memoryStorage() 
       });
     }
 
-    // Firebase push
     await pool.query(
   'INSERT INTO promotions(text,photo_url,target_type,group_id,interval_ms,next_send_at,active,created_at) VALUES($1,$2,$3,$4,$5,$6,true,$7)',
   [text||'', photoUrl, targetType||'bot', groupId||'', Number(intervalMs)||3600000, Date.now()+Number(intervalMs), Date.now()]
@@ -403,7 +401,7 @@ app.post('/create-interval-promotion', multer({ storage: multer.memoryStorage() 
     res.json({ ok: false, msg: '❌ Error: ' + e.message });
   }
 });
-// ══ SEND PROMOTION (አሁን ላክ) ══
+
 app.post('/send-promotion', multer({ storage: multer.memoryStorage() }).single('photo'), async (req, res) => {
   const { text, targetType, groupId } = req.body;
   const photoBuffer = req.file ? req.file.buffer : null;
@@ -416,31 +414,25 @@ app.post('/send-promotion', multer({ storage: multer.memoryStorage() }).single('
   }
 });
 
-// ══ PROMOTION SCHEDULER — FIREBASE BASED ══
-// Firebase: promotions/{key} = { text, photoUrl, targetType, groupId, intervalMs, nextSendAt, active }
-// photo → photoUrl (Cloudinary ወይም ሌላ) — buffer Firebase ላይ አይቀመጥም
-// HTML → Firebase push → server ያነብ → ሲልክ nextSendAt ያዘምናል
-
 async function checkPromotions() {
   const promos = (await pool.query('SELECT * FROM promotions WHERE active=true')).rows;
     const now = Date.now();
     for (let key in promos) {
       const p = promos[key];
-      if (!p.active) continue;              // active:false → skip
+      if (!p.active) continue;
       if (!p.nextSendAt) continue;
-      if (now < p.nextSendAt) continue;     // ገና ሰዓቱ አልደረሰም
+      if (now < p.nextSendAt) continue;
 
       console.log(`📢 Sending interval promotion: ${key}`);
       try {
         await broadcastPromotion({
           text: p.text || '',
-          photoBuffer: null,                // photo URL ነው — buffer የለም
+          photoBuffer: null,
           photoUrl: p.photoUrl || '',
           targetType: p.targetType || 'bot',
           groupId: p.groupId || ''
         });
-        // ቀጣዩ send time ያዘምናል
-          await pool.query(
+        await pool.query(
   'UPDATE promotions SET next_send_at=$1, last_sent_at=$2 WHERE id=$3',
   [now + (p.intervalMs || 3600000), now, p.id]
 );
@@ -563,7 +555,6 @@ function clearAllTimers() {
 }
 
 // ══ AUTO MODE ══
-// ── Auto Mode Polling ──
 setInterval(async () => {
   try {
     const val = await getState('autoMode/on');
@@ -601,6 +592,7 @@ async function startAutoCountdown() {
   }, 1000);
 }
 
+// ══ FIX 1: startAutoGame — bots አስቀድሞ ይጨምራል፣ ከዚያ cards ያነባል ══
 async function startAutoGame() {
   if (!autoModeOn) return;
   try {
@@ -610,22 +602,84 @@ async function startAutoGame() {
     await setState('game/pendingWinner', null);
     await setState('game/winners', null);
     await setState('game/paid', false);
-    await setState('game/confirmedNumbers', {});
     await setState('game/status', { started: true, autoStarted: true });
     await setState('autoMode/phase', 'playing');
     console.log('🎮 Game Started!');
+
+    // ✅ FIX: confirmedNumbers reset አታድርግ — cards countdown ወቅት ስለሚያዙ
+    // game/confirmedNumbers ን አትጥፋ! bots ለማከል ትንሽ ጠብቅ ከዚያ ጀምር
     const callSpeed = (await getState('autoMode/callSpeed')) || 6000;
-    autoCallNumber(callSpeed);
+
+    // Bots ካሉ ያስቀምጣቸዋል — ከዚያ 2 ሰኮንድ ቆይቶ ይጀምራል
+    await addBotsIfNeeded();
+
+    // ✅ 2 ሰኮንድ ቆይቶ cards ካረጋገጠ በኋላ ያነሳል
+    setTimeout(() => {
+      autoCallNumber(callSpeed);
+    }, 2000);
+
   } catch(e) {
     console.error('❌ startAutoGame error:', e.message);
     setTimeout(() => { if (autoModeOn) startAutoCountdown(); }, 10000);
   }
 }
+
+// ✅ NEW: Bots ማከያ function
+async function addBotsIfNeeded() {
+  try {
+    const smartBot = await getState('smartBot');
+    if (!smartBot?.enabled) return;
+
+    const allCards = (await getState('game/confirmedNumbers')) || {};
+    const realPlayerCount = Object.keys(allCards).length;
+    const minCards = smartBot.minCards || 5;
+    const botsNeeded = Math.max(0, minCards - realPlayerCount);
+    if (botsNeeded === 0) return;
+
+    const bet = (await getState('game/bet')) || 0;
+    const pct = (await getState('game/percent')) || 80;
+
+    for (let i = 0; i < botsNeeded; i++) {
+      const botId = `bot_${Date.now()}_${i}`;
+      const botName = `Bot${Math.floor(Math.random() * 9000) + 1000}`;
+      await pool.query(
+        'INSERT INTO users(uid,display,balance,is_bot) VALUES($1,$2,$3,true) ON CONFLICT(uid) DO UPDATE SET display=$2',
+        [botId, botName, bet * 10]
+      );
+      // Random card ID
+      const cardId = String(Math.floor(Math.random() * 900000) + 100000);
+      if (!allCards[cardId]) {
+        allCards[cardId] = botId;
+        await pool.query('UPDATE users SET balance = balance - $1 WHERE uid=$2', [bet, botId]);
+      }
+    }
+    await setState('game/confirmedNumbers', allCards);
+    const total = Object.keys(allCards).length;
+    await setState('game/prize', Math.floor(bet * total * (pct / 100)));
+    await setState('game/total', bet * total);
+    console.log(`🤖 Added ${botsNeeded} bots. Total cards: ${total}`);
+  } catch(e) {
+    console.error('❌ addBotsIfNeeded error:', e.message);
+  }
+}
+
 async function autoCallNumber(speed) {
   if (!autoModeOn) return;
   clearInterval(callTimer);
 
+  // ✅ FIX: Cards ከDB ዘግቶ ያነባል
   const allCards = (await getState('game/confirmedNumbers')) || {};
+  console.log(`📋 Cards at game start: ${Object.keys(allCards).length}`);
+
+  // ✅ FIX: Cards ከሌሉ ቢያንስ 1 ሰኮንድ ጠብቆ እንደገና ይሞክራል
+  if (Object.keys(allCards).length === 0) {
+    console.log('⚠️ No cards found! Retrying in 3s...');
+    setTimeout(async () => {
+      if (autoModeOn) await autoCallNumber(speed);
+    }, 3000);
+    return;
+  }
+
   const usersSnap = await pool.query('SELECT uid, display, is_bot FROM users');
   const allUsers = {};
   usersSnap.rows.forEach(r => { allUsers[r.uid] = { display: r.display, is_bot: r.is_bot }; });
@@ -640,6 +694,8 @@ async function autoCallNumber(speed) {
     if (isBot) botCards.push(entry);
     else realCards.push(entry);
   }
+
+  console.log(`🎮 Real cards: ${realCards.length}, Bot cards: ${botCards.length}`);
 
   const botWinPercent = (await getState('autoMode/botWinPercent')) ?? 50;
   const roll = Math.floor(Math.random() * 100) + 1;
@@ -657,7 +713,7 @@ async function autoCallNumber(speed) {
   }
 
   if (!targetCard) {
-    console.log('⚠️ No cards');
+    console.log('⚠️ No target card after retry — scheduling next round');
     await scheduleNextRound();
     return;
   }
@@ -686,7 +742,6 @@ async function autoCallNumber(speed) {
 
       if (!remaining.length) {
         clearInterval(callTimer);
-        // ሁሉም ሳይጠናቀቅ — ገንዘብ መልስ
         for (let cardId in allCards) {
           const uid = allCards[cardId];
           if (allUsers[uid]?.is_bot) continue;
@@ -730,7 +785,7 @@ async function autoCallNumber(speed) {
 
       if (winners.length > 0) {
         clearInterval(callTimer);
-        console.log(`🏆 Winner! after ${calledNumbers.length} calls`);
+        console.log(`🏆 Winner found after ${calledNumbers.length} calls`);
         await setState('game/pendingWinner', { winners, prize, announced: false, time: Date.now() });
         startAutoAnnounce();
       }
@@ -739,13 +794,25 @@ async function autoCallNumber(speed) {
     }
   }, speed);
 }
+
+// ✅ FIX 2: Winner announce — 5 ሰኮንድ ቆይቶ ከዚያ announceWinner ይጠራል
 async function startAutoAnnounce() {
   if (!autoModeOn) return;
   clearAllTimers();
   await setState('autoMode/phase', 'announcing');
+  console.log('🎉 Winner found! Announcing in 5 seconds...');
+
+  // ✅ 5 ሰኮንድ countdown ከዚያ announce
   let count = 5;
   announceTimer = setInterval(async () => {
-    if (--count <= 0) { clearInterval(announceTimer); await announceWinner(); await scheduleNextRound(); }
+    count--;
+    console.log(`⏳ Announcing in ${count}s...`);
+    if (count <= 0) {
+      clearInterval(announceTimer);
+      announceTimer = null;
+      await announceWinner();
+      await scheduleNextRound();
+    }
   }, 1000);
 }
 
@@ -760,11 +827,11 @@ async function announceWinner() {
     for (let w of winners) {
       if (w.isBot) { botWinShare += share; continue; }
       await pool.query('UPDATE users SET balance = balance + $1 WHERE uid=$2', [share, w.user]);
-await pool.query('INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
-  [w.user, `🎉 አሸነፍክ! ${share} ብር balance ላይ ታከለ! Card #${w.cardId}`, Date.now()]);
-   await pool.query('UPDATE analytics SET value = GREATEST(0, value - $1) WHERE key=$2',
-  [share, 'totalProfit']);
-    }  // ← ይህን ጨምሩ!
+      await pool.query('INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
+        [w.user, `🎉 አሸነፍክ! ${share} ብር balance ላይ ታከለ! Card #${w.cardId}`, Date.now()]);
+      await pool.query('UPDATE analytics SET value = GREATEST(0, value - $1) WHERE key=$2',
+        [share, 'totalProfit']);
+    }
 
     if (botWinShare > 0) {
       await pool.query('INSERT INTO analytics(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value = analytics.value + $2', ['totalProfit', botWinShare]);
@@ -773,21 +840,20 @@ await pool.query('INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,
     const winnersObj = {};
     winners.forEach((w, i) => { winnersObj[i] = { ...w, prize: share }; });
     await setState('game/winners', winnersObj);
-for (const w of winners) {
-  await pool.query('INSERT INTO all_winners(uid,display_name,card_id,prize,is_bot,time) VALUES($1,$2,$3,$4,$5,$6)',
-    [w.user, w.displayName, w.cardId, share, w.isBot||false, Date.now()]);
-}
-await setState('game/announcement', { type:'winner', winners, prize, share, time:Date.now() });
-await setState('game/paid', true);
-await setState('game/pendingWinner', { ...data, announced:true });
-await setState('game/status', { started:false, waitingRestart:true });
-const allCards = (await getState('game/confirmedNumbers')) || {};
-const playerCount = new Set(Object.values(allCards)).size;
-const total = (await getState('game/total')) || 0;
-await pool.query('INSERT INTO analytics(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value = analytics.value + $2', ['totalCollected', total]);
-await pool.query('INSERT INTO analytics(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value = analytics.value + $2', ['totalPaidOut', prize]);
-await pool.query('INSERT INTO analytics(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value = analytics.value + $2', ['dailyProfit', botWinShare]);
-await setState('analytics/dailyRound', roundNumber);
+    for (const w of winners) {
+      await pool.query('INSERT INTO all_winners(uid,display_name,card_id,prize,is_bot,time) VALUES($1,$2,$3,$4,$5,$6)',
+        [w.user, w.displayName, w.cardId, share, w.isBot||false, Date.now()]);
+    }
+    await setState('game/announcement', { type:'winner', winners, prize, share, time:Date.now() });
+    await setState('game/paid', true);
+    await setState('game/pendingWinner', { ...data, announced:true });
+    await setState('game/status', { started:false, waitingRestart:true });
+    const allCards = (await getState('game/confirmedNumbers')) || {};
+    const total = (await getState('game/total')) || 0;
+    await pool.query('INSERT INTO analytics(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value = analytics.value + $2', ['totalCollected', total]);
+    await pool.query('INSERT INTO analytics(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value = analytics.value + $2', ['totalPaidOut', prize]);
+    await pool.query('INSERT INTO analytics(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value = analytics.value + $2', ['dailyProfit', botWinShare]);
+    await setState('analytics/dailyRound', roundNumber);
     console.log(`✅ Paid! ${share} ብር to ${winners.length} winner(s)`);
   } catch (e) { console.error('❌ announceWinner error:', e.message); }
 }
@@ -828,7 +894,6 @@ async function broadcastPromotion(promoData) {
       const url = new URL(BOT_PY_URL);
 
       if (photoBuffer) {
-        // Buffer ነው — directly upload
         const boundary = '----FormBoundary' + Date.now();
         const body = Buffer.concat([
           Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="text"\r\n\r\n${text || ''}\r\n`),
@@ -857,7 +922,6 @@ async function broadcastPromotion(promoData) {
         });
 
       } else if (photoUrl) {
-        // URL ነው — photo_url ጋር እንልካለን
         const boundary = '----FormBoundary' + Date.now();
         const body = Buffer.concat([
           Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="text"\r\n\r\n${text || ''}\r\n`),
@@ -885,7 +949,6 @@ async function broadcastPromotion(promoData) {
         });
 
       } else {
-        // Text ብቻ
         const postData = JSON.stringify({ text: text || '' });
         await new Promise((resolve) => {
           const options = {
@@ -920,6 +983,7 @@ async function broadcastPromotion(promoData) {
     console.error('❌ broadcastPromotion error:', e.message);
   }
 }
+
 async function scheduleNextRound() {
   if (!autoModeOn) return;
   try {
@@ -940,11 +1004,12 @@ async function scheduleNextRound() {
     await setState('game/calledNumbers', []);
     await setState('game/status', { started: false });
     await setState('game/winners', null);
-// pendingWinner እና announcement 10 ሰኮንድ ቆይተው ይጠፋሉ
-setTimeout(async () => {
-  await setState('game/pendingWinner', null);
-  await setState('game/announcement', null);
-}, 10000);
+
+    setTimeout(async () => {
+      await setState('game/pendingWinner', null);
+      await setState('game/announcement', null);
+    }, 10000);
+
     await setState('game/paid', false);
     await setState('game/confirmedNumbers', {});
     await setState('game/prize', 0);
@@ -961,65 +1026,6 @@ setTimeout(async () => {
   }
 }
 
-// GET /all-winners
-app.get('/all-winners', async (req, res) => {
-  try {
-    const r = await pool.query('SELECT * FROM all_winners ORDER BY time DESC LIMIT 50');
-    const round = await getState('autoMode/round') || 1;
-    res.json({ winners: r.rows, round });
-  } catch(e) { res.json({ winners: [], round: 1 }); }
-});
-
-// GET /health
-app.get('/health', (req, res) => res.json({ ok: true }));
-
-// POST /submit-payment
-app.post('/submit-payment', multer({ storage: multer.memoryStorage() }).single('photo'), async (req, res) => {
-  try {
-    const { userId, amount } = req.body;
-    const photoBuffer = req.file ? req.file.buffer : null;
-    if(!photoBuffer) return res.json({ ok: false, msg: 'Photo ያስፈልጋል!' });
-    if(!userId || !amount) return res.json({ ok: false, msg: 'Missing data' });
-
-    const BOT_TOKEN = process.env.BOT_TOKEN || '';
-    const ADMIN_CHAT = process.env.ADMIN_CHAT_ID || '';
-
-    const boundary = '----FormBoundary' + Date.now();
-    const caption = `💳 Payment Request\nUser: ${userId}\nAmount: ${amount} ብር`;
-    const body = Buffer.concat([
-      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${ADMIN_CHAT}\r\n`),
-      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption}\r\n`),
-      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="pay.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
-      photoBuffer,
-      Buffer.from(`\r\n--${boundary}--\r\n`)
-    ]);
-
-    await new Promise((resolve) => {
-      const options = {
-        hostname: 'api.telegram.org',
-        path: `/bot${BOT_TOKEN}/sendPhoto`,
-        method: 'POST',
-        headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length }
-      };
-      const r = require('https').request(options, (res) => {
-        let d = ''; res.on('data', c => d += c); res.on('end', () => resolve());
-      });
-      r.on('error', () => resolve());
-      r.write(body); r.end();
-    });
-
-    res.json({ ok: true });
-  } catch(e) { res.json({ ok: false, msg: e.message }); }
-});
-
-// POST /set-not-new
-app.post('/set-not-new', async (req, res) => {
-  try {
-    const { userId } = req.body;
-    await pool.query('UPDATE users SET balance=balance WHERE uid=$1', [userId]);
-    res.json({ ok: true });
-  } catch(e) { res.json({ ok: false }); }
-});
 setTimeout(async () => {
   try {
     const autoOn = await getState('autoMode/on');
@@ -1030,7 +1036,12 @@ setTimeout(async () => {
       roundNumber = (await getState('autoMode/round')) || 1;
       const gameStatus = await getState('game/status');
       if (gameStatus?.started) {
-        await scheduleNextRound();
+        // ✅ Game ጀምሮ ሳለ restart ሆነ — cards አትጥፋ፣ game ቀጥል
+        console.log('🔄 Game was running — continuing...');
+        const callSpeed = (await getState('autoMode/callSpeed')) || 6000;
+        const savedCalled = (await getState('game/calledNumbers')) || [];
+        calledNumbers = Array.isArray(savedCalled) ? savedCalled : Object.values(savedCalled);
+        await autoCallNumber(callSpeed);
       } else {
         await startAutoCountdown();
       }
