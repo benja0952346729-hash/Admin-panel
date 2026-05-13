@@ -36,6 +36,88 @@ app.use(cors({
 app.use(express.static(__dirname));
 app.use(express.json());
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
+app.get('/health', (req, res) => res.json({ ok: true }));
+app.get('/user-state', async (req, res) => {
+  const { userId } = req.query;
+  if (!userId) return res.json({ balance: 0, isNew: false });
+  try {
+    const insert = await pool.query(
+      `INSERT INTO users(uid,display,balance,is_bot)
+       VALUES($1,$1,0,false)
+       ON CONFLICT(uid) DO NOTHING RETURNING uid`,
+      [userId]
+    );
+    const isNew = insert.rows.length > 0;
+    if (isNew) {
+      await pool.query('UPDATE users SET balance=balance+20 WHERE uid=$1', [userId]);
+    }
+    const u = await pool.query('SELECT balance FROM users WHERE uid=$1', [userId]);
+    res.json({ balance: u.rows[0]?.balance || 0, isNew });
+  } catch(e) { res.json({ balance: 0, isNew: false }); }
+});
+app.post('/set-not-new', async (req, res) => {
+  res.json({ ok: true });
+});
+app.get('/all-winners', async (req, res) => {
+  try {
+    const r = await pool.query(
+      'SELECT * FROM all_winners ORDER BY time DESC LIMIT 100'
+    );
+    const round = (await getState('autoMode/round')) || 1;
+    res.json({ winners: r.rows, round });
+  } catch(e) { res.json({ winners: [], round: 1 }); }
+});
+app.post('/submit-payment',
+  multer({ storage: multer.memoryStorage() }).single('photo'),
+  async (req, res) => {
+    const { userId, amount } = req.body;
+    const file = req.file;
+    if (!file || !userId || !amount)
+      return res.json({ ok: false, msg: '❌ Data missing' });
+    try {
+      const auth = Buffer.from(`${CLOUDINARY_API_KEY}:${CLOUDINARY_API_SECRET}`).toString('base64');
+      const boundary = '----FormBoundary' + Date.now();
+      const body = Buffer.concat([
+        Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="pay.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
+        file.buffer,
+        Buffer.from(`\r\n--${boundary}--\r\n`)
+      ]);
+      const photoUrl = await new Promise((resolve) => {
+        const opts = {
+          hostname: 'api.cloudinary.com',
+          path: `/v1_1/${CLOUDINARY_CLOUD}/image/upload`,
+          method: 'POST',
+          headers: {
+            'Authorization': `Basic ${auth}`,
+            'Content-Type': `multipart/form-data; boundary=${boundary}`,
+            'Content-Length': body.length
+          }
+        };
+        const req2 = require('https').request(opts, r => {
+          let d = '';
+          r.on('data', c => d += c);
+          r.on('end', () => {
+            try { resolve(JSON.parse(d).secure_url || ''); }
+            catch { resolve(''); }
+          });
+        });
+        req2.on('error', () => resolve(''));
+        req2.write(body); req2.end();
+      });
+
+      const key = `pay_${userId}_${Date.now()}`;
+      const existing = (await getState('bot/payments')) || {};
+      existing[key] = {
+        user_id: userId, amount: Number(amount),
+        photo_url: photoUrl, status: 'pending',
+        time: new Date().toISOString()
+      };
+      await setState('bot/payments', existing);
+
+      res.json({ ok: true });
+    } catch(e) { res.json({ ok: false, msg: e.message }); }
+  }
+);
 app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
 // GET /game-state — ሁሉንም state ያስቀምጣል
 app.get('/game-state', async (req, res) => {
@@ -854,6 +936,80 @@ async function scheduleNextRound() {
     setTimeout(() => { if (autoModeOn) startAutoCountdown(); }, 15000);
   }
 }
+// GET /user-state
+app.get('/user-state', async (req, res) => {
+  try {
+    const { userId } = req.query;
+    const r = await pool.query('SELECT balance FROM users WHERE uid=$1', [userId]);
+    const isNew = r.rows.length === 0;
+    if(isNew) {
+      await pool.query('INSERT INTO users(uid,display,balance) VALUES($1,$2,$3) ON CONFLICT(uid) DO NOTHING', [userId, userId, 20]);
+      res.json({ balance: 20, isNew: true });
+    } else {
+      res.json({ balance: Number(r.rows[0].balance), isNew: false });
+    }
+  } catch(e) { res.json({ balance: 0, isNew: false }); }
+});
+
+// GET /all-winners
+app.get('/all-winners', async (req, res) => {
+  try {
+    const r = await pool.query('SELECT * FROM all_winners ORDER BY time DESC LIMIT 50');
+    const round = await getState('autoMode/round') || 1;
+    res.json({ winners: r.rows, round });
+  } catch(e) { res.json({ winners: [], round: 1 }); }
+});
+
+// GET /health
+app.get('/health', (req, res) => res.json({ ok: true }));
+
+// POST /submit-payment
+app.post('/submit-payment', multer({ storage: multer.memoryStorage() }).single('photo'), async (req, res) => {
+  try {
+    const { userId, amount } = req.body;
+    const photoBuffer = req.file ? req.file.buffer : null;
+    if(!photoBuffer) return res.json({ ok: false, msg: 'Photo ያስፈልጋል!' });
+    if(!userId || !amount) return res.json({ ok: false, msg: 'Missing data' });
+
+    const BOT_TOKEN = process.env.BOT_TOKEN || '';
+    const ADMIN_CHAT = process.env.ADMIN_CHAT_ID || '';
+
+    const boundary = '----FormBoundary' + Date.now();
+    const caption = `💳 Payment Request\nUser: ${userId}\nAmount: ${amount} ብር`;
+    const body = Buffer.concat([
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${ADMIN_CHAT}\r\n`),
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption}\r\n`),
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="pay.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
+      photoBuffer,
+      Buffer.from(`\r\n--${boundary}--\r\n`)
+    ]);
+
+    await new Promise((resolve) => {
+      const options = {
+        hostname: 'api.telegram.org',
+        path: `/bot${BOT_TOKEN}/sendPhoto`,
+        method: 'POST',
+        headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length }
+      };
+      const r = require('https').request(options, (res) => {
+        let d = ''; res.on('data', c => d += c); res.on('end', () => resolve());
+      });
+      r.on('error', () => resolve());
+      r.write(body); r.end();
+    });
+
+    res.json({ ok: true });
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
+});
+
+// POST /set-not-new
+app.post('/set-not-new', async (req, res) => {
+  try {
+    const { userId } = req.body;
+    await pool.query('UPDATE users SET balance=balance WHERE uid=$1', [userId]);
+    res.json({ ok: true });
+  } catch(e) { res.json({ ok: false }); }
+});
 setTimeout(async () => {
   try {
     const autoOn = await getState('autoMode/on');
