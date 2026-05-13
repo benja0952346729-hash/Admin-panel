@@ -606,15 +606,12 @@ async function startAutoGame() {
   try {
     calledNumbers = [];
     await setState('game/countdown', { active: false });
-    await setState('game/status', { started: true, autoStarted: true });
     await setState('game/calledNumbers', []);
-    await setState('game/winners', null);
     await setState('game/pendingWinner', null);
-    // announcement 8 ሰኮንድ ቆይቶ ይጠፋ
-setTimeout(async () => {
-  await setState('game/announcement', null);
-}, 8000);
+    await setState('game/winners', null);
     await setState('game/paid', false);
+    await setState('game/confirmedNumbers', {});
+    await setState('game/status', { started: true, autoStarted: true });
     await setState('autoMode/phase', 'playing');
     console.log('🎮 Game Started!');
     const callSpeed = (await getState('autoMode/callSpeed')) || 6000;
@@ -944,7 +941,10 @@ async function scheduleNextRound() {
     await setState('game/status', { started: false });
     await setState('game/pendingWinner', null);
     await setState('game/winners', null);
-    await setState('game/announcement', null);
+    // announcement 8 ሰኮንድ ቆይቶ ይጠፋ
+setTimeout(async () => {
+  await setState('game/announcement', null);
+}, 8000);
     await setState('game/paid', false);
     await setState('game/confirmedNumbers', {});
     await setState('game/prize', 0);
