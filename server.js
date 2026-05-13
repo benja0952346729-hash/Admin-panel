@@ -610,7 +610,10 @@ async function startAutoGame() {
     await setState('game/calledNumbers', []);
     await setState('game/winners', null);
     await setState('game/pendingWinner', null);
-    await setState('game/announcement', null);
+    // announcement 8 ሰኮንድ ቆይቶ ይጠፋ
+setTimeout(async () => {
+  await setState('game/announcement', null);
+}, 8000);
     await setState('game/paid', false);
     await setState('autoMode/phase', 'playing');
     console.log('🎮 Game Started!');
