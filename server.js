@@ -844,7 +844,7 @@ async function announceWinner() {
       await pool.query('INSERT INTO all_winners(uid,display_name,card_id,prize,is_bot,time) VALUES($1,$2,$3,$4,$5,$6)',
         [w.user, w.displayName, w.cardId, share, w.isBot||false, Date.now()]);
     }
-    await setState('game/announcement', { type:'winner', winners, prize, share, time:Date.now() });
+    await setState('game/announcement', { type:'winner', winners, prize, share, time:Date.now(), calledNumbers });
     await setState('game/paid', true);
     await setState('game/pendingWinner', { ...data, announced:true });
     await setState('game/status', { started:false, waitingRestart:true });
