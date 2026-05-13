@@ -119,6 +119,27 @@ app.post('/submit-payment',
     } catch(e) { res.json({ ok: false, msg: e.message }); }
   }
 );
+// SSE clients
+let sseClients = [];
+
+app.get('/events', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  sseClients.push(res);
+
+  req.on('close', () => {
+    sseClients = sseClients.filter(c => c !== res);
+  });
+});
+
+function broadcast(data) {
+  sseClients.forEach(client => {
+    client.write(`data: ${JSON.stringify(data)}\n\n`);
+  });
+}
 app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
 // GET /game-state — ሁሉንም state ያስቀምጣል
 app.get('/game-state', async (req, res) => {
@@ -844,6 +865,7 @@ async function announceWinner() {
       await pool.query('INSERT INTO all_winners(uid,display_name,card_id,prize,is_bot,time) VALUES($1,$2,$3,$4,$5,$6)',
         [w.user, w.displayName, w.cardId, share, w.isBot||false, Date.now()]);
     }
+    broadcast({ type:'winner', winners, prize, share, calledNumbers: calledNumbers, time: Date.now() });
     await setState('game/announcement', { type:'winner', winners, prize, share, time:Date.now(), calledNumbers });
     await setState('game/paid', true);
     await setState('game/pendingWinner', { ...data, announced:true });
