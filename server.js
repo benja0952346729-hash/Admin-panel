@@ -38,7 +38,8 @@ app.use(express.json());
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 app.get('/health', (req, res) => res.json({ ok: true }));
 app.get('/user-state', async (req, res) => {
-  const { userId } = req.query;
+  const { userId, firstName } = req.query;
+  const displayName = firstName ? decodeURIComponent(firstName) : userId;
   if (!userId) return res.json({ balance: 0, isNew: false });
   try {
     const insert = await pool.query(
@@ -139,6 +140,10 @@ app.get('/game-state', async (req, res) => {
     flat.autoMode = result.autoMode;
     flat.smartBot = result.smartBot;
     flat.settings = result.settings;
+    const usersRes = await pool.query('SELECT uid, display FROM users');
+const displayNames = {};
+usersRes.rows.forEach(r => { displayNames[r.uid] = r.display; });
+flat.displayNames = displayNames;
     res.json(flat);
   } catch(e) { res.json({}); }
 });
@@ -941,20 +946,6 @@ async function scheduleNextRound() {
     setTimeout(() => { if (autoModeOn) startAutoCountdown(); }, 15000);
   }
 }
-// GET /user-state
-app.get('/user-state', async (req, res) => {
-  try {
-    const { userId } = req.query;
-    const r = await pool.query('SELECT balance FROM users WHERE uid=$1', [userId]);
-    const isNew = r.rows.length === 0;
-    if(isNew) {
-      await pool.query('INSERT INTO users(uid,display,balance) VALUES($1,$2,$3) ON CONFLICT(uid) DO NOTHING', [userId, userId, 20]);
-      res.json({ balance: 20, isNew: true });
-    } else {
-      res.json({ balance: Number(r.rows[0].balance), isNew: false });
-    }
-  } catch(e) { res.json({ balance: 0, isNew: false }); }
-});
 
 // GET /all-winners
 app.get('/all-winners', async (req, res) => {
