@@ -232,49 +232,61 @@ app.get('/game-state', async (req, res) => {
       try { obj[keys[keys.length-1]] = JSON.parse(r.value); }
       catch { obj[keys[keys.length-1]] = r.value; }
     });
-    // ✅ game/ ን flatten አድርግ
     const flat = result.game || {};
     flat.autoMode = result.autoMode;
     flat.smartBot = result.smartBot;
     flat.settings = result.settings;
     flat.announcement = result.game?.announcement;
-flat.winners = result.game?.winners;
-flat.pendingWinner = result.game?.pendingWinner;
-flat.status = result.game?.status;
-flat.calledNumbers = result.game?.calledNumbers;
-flat.countdown = result.game?.countdown;
-flat.bet = result.game?.bet;
-flat.prize = result.game?.prize;
-flat.percent = result.game?.percent;
-flat.confirmedNumbers = result.game?.confirmedNumbers;
-flat.paid = result.game?.paid;
+    flat.winners = result.game?.winners;
+    flat.pendingWinner = result.game?.pendingWinner;
+    flat.status = result.game?.status;
+    flat.calledNumbers = result.game?.calledNumbers;
+    flat.countdown = result.game?.countdown;
+    flat.bet = result.game?.bet;
+    flat.prize = result.game?.prize;
+    flat.percent = result.game?.percent;
+    flat.confirmedNumbers = result.game?.confirmedNumbers;
+    flat.paid = result.game?.paid;
     const usersRes = await pool.query('SELECT uid, display FROM users');
-const displayNames = {};
-usersRes.rows.forEach(r => { displayNames[r.uid] = r.display; });
-flat.displayNames = displayNames;
+    const displayNames = {};
+    usersRes.rows.forEach(r => { displayNames[r.uid] = r.display; });
+    flat.displayNames = displayNames;
+
+    // ✅ Frontend polling ለ paths
+    flat['game/countdown'] = flat.countdown;
+    flat['game/status'] = flat.status;
+    flat['game/calledNumbers'] = flat.calledNumbers;
+    flat['game/winners'] = flat.winners;
+    flat['game/bet'] = flat.bet;
+    flat['game/prize'] = flat.prize;
+    flat['game/percent'] = flat.percent;
+    flat['game/confirmedNumbers'] = flat.confirmedNumbers;
+    flat['game/paid'] = flat.paid;
+    flat['game/pendingWinner'] = flat.pendingWinner;
+    flat['game/announcement'] = flat.announcement;
+    flat['autoMode/on'] = flat.autoMode?.on;
+    flat['autoMode/phase'] = flat.autoMode?.phase;
+    flat['autoMode/cdMinutes'] = flat.autoMode?.cdMinutes;
+    flat['autoMode/round'] = flat.autoMode?.round;
+    flat['autoMode/callSpeed'] = flat.autoMode?.callSpeed;
+    flat['autoMode/botWinPercent'] = flat.autoMode?.botWinPercent;
+    flat['smartBot/enabled'] = result.smartBot?.enabled;
+    flat['bot/withdrawals'] = result.bot?.withdrawals;
+    flat['bot/settings/cbe_account'] = result.bot?.settings?.cbe_account;
+    flat['bot/settings/telebirr_account'] = result.bot?.settings?.telebirr_account;
+    flat['analytics/totalCollected'] = result.analytics?.totalCollected;
+    flat['analytics/totalPaidOut'] = result.analytics?.totalPaidOut;
+    flat['analytics/totalDeposits'] = result.analytics?.totalDeposits;
+    flat['analytics/totalWithdrawals'] = result.analytics?.totalWithdrawals;
+    flat['analytics/avgPlayers'] = result.analytics?.avgPlayers;
+    flat['analytics/totalProfit'] = result.analytics?.totalProfit;
+    flat['analytics/botWinProfit'] = result.analytics?.botWinProfit;
+    flat['analytics/history'] = result.analytics?.history;
+    flat['confirmedNumbers'] = flat.confirmedNumbers;
+
     res.json(flat);
   } catch(e) { res.json({}); }
 });
-
-// POST /set-state — key/value ያስቀምጣል
-app.post('/set-state', async (req, res) => {
-  try {
-    const { key, value } = req.body;
-    await setState(key, value);
-    res.json({ ok: true });
-  } catch(e) { res.json({ ok: false, msg: e.message }); }
-});
-
-// GET /analytics
-app.get('/analytics', async (req, res) => {
-  try {
-    const rows = await pool.query('SELECT key, value FROM analytics');
-    const data = {};
-    rows.rows.forEach(r => data[r.key] = Number(r.value));
-    res.json(data);
-  } catch(e) { res.json({}); }
-});
-
 // GET /withdrawals
 app.get('/withdrawals', async (req, res) => {
   try {
