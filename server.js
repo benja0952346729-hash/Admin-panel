@@ -383,6 +383,47 @@ app.post('/remove-bots', async (req, res) => {
     res.json({ ok: true });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
+// GET /unread-notifications
+app.get('/unread-notifications', async (req, res) => {
+  try {
+    const r = await pool.query(
+      'SELECT id, uid, message FROM notifications WHERE read=false ORDER BY time ASC LIMIT 50'
+    );
+    res.json(r.rows);
+  } catch(e) { res.json([]); }
+});
+
+// POST /mark-notification-read
+app.post('/mark-notification-read', async (req, res) => {
+  try {
+    const { id } = req.body;
+    await pool.query('UPDATE notifications SET read=true WHERE id=$1', [id]);
+    res.json({ ok: true });
+  } catch(e) { res.json({ ok: false }); }
+});
+// POST /update-balance
+app.post('/update-balance', async (req, res) => {
+  try {
+    const { uid, amount, type } = req.body;
+    if (type === 'add') {
+      await pool.query('UPDATE users SET balance = balance + $1 WHERE uid=$2', [amount, uid]);
+    } else {
+      await pool.query('UPDATE users SET balance = GREATEST(0, balance - $1) WHERE uid=$2', [amount, uid]);
+    }
+    const r = await pool.query('SELECT balance FROM users WHERE uid=$1', [uid]);
+    const newBal = r.rows[0]?.balance || 0;
+    res.json({ ok: true, balance: newBal });
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
+});
+
+// GET /get-balance
+app.get('/get-balance', async (req, res) => {
+  try {
+    const { uid } = req.query;
+    const r = await pool.query('SELECT balance FROM users WHERE uid=$1', [uid]);
+    res.json({ balance: r.rows[0]?.balance || 0 });
+  } catch(e) { res.json({ balance: 0 }); }
+});
 // ══ CLOUDINARY SOUNDS ══
 const CLOUDINARY_CLOUD = 'diado1bxi';
 const CLOUDINARY_API_KEY = '117446111831141';
@@ -1156,6 +1197,10 @@ setInterval(async () => {
       `DELETE FROM all_winners WHERE id NOT IN 
       (SELECT id FROM all_winners ORDER BY time DESC LIMIT 500)`
     );
+    await pool.query(
+  'DELETE FROM promotions WHERE active=false AND created_at < $1',
+  [Date.now() - (30 * 24 * 60 * 60 * 1000)]
+);
     console.log('✅ Auto cleanup done');
   } catch(e) {
     console.error('Cleanup error:', e.message);
