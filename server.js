@@ -412,6 +412,7 @@ app.post('/update-balance', async (req, res) => {
     }
     const r = await pool.query('SELECT balance FROM users WHERE uid=$1', [uid]);
     const newBal = r.rows[0]?.balance || 0;
+    broadcast({ type: 'balance', uid, balance: newBal });
     res.json({ ok: true, balance: newBal });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
@@ -610,6 +611,12 @@ const total = Object.keys(allCards).length;
 const pct = (await getState('game/percent')) || 80;
 await setState('game/prize', Math.floor(bet * total * (pct/100)));
 await setState('game/total', bet * total);
+const currentPrize = await getState('game/prize');
+const currentBet = await getState('game/bet');
+const allC = (await getState('game/confirmedNumbers')) || {};
+const totalCards = Object.keys(allC).length;
+const totalPlayers = new Set(Object.values(allC)).size;
+broadcast({ type: 'card_taken', cardId, userId, prize: currentPrize, bet: currentBet, totalCards, totalPlayers });
     return res.json({ ok: true, msg: '✅ Card confirmed!' });
   } catch (e) {
     return res.json({ ok: false, msg: 'Error: ' + e.message });
