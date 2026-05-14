@@ -1225,5 +1225,38 @@ setInterval(async () => {
     console.error('Cleanup error:', e.message);
   }
 }, 24 * 60 * 60 * 1000);
+// ══ ADMIN CONTROL ENDPOINTS ══
+app.post('/admin/auto-start', async (req, res) => {
+  try {
+    await setState('autoMode/on', true);
+    autoModeOn = true;
+    autoCdMinutes = (await getState('autoMode/cdMinutes')) || 3;
+    roundNumber = (await getState('autoMode/round')) || 1;
+    startAutoCountdown();
+    res.json({ ok: true, msg: '✅ Auto mode started!' });
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
+});
+
+app.post('/admin/auto-stop', async (req, res) => {
+  try {
+    await setState('autoMode/on', false);
+    autoModeOn = false;
+    clearAllTimers();
+    await setState('autoMode/phase', 'idle');
+    res.json({ ok: true, msg: '✅ Auto mode stopped!' });
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
+});
+
+app.post('/admin/set-settings', async (req, res) => {
+  try {
+    const { bet, percent, cdMinutes, callSpeed, botWinPercent } = req.body;
+    if (bet !== undefined) await setState('game/bet', Number(bet));
+    if (percent !== undefined) await setState('game/percent', Number(percent));
+    if (cdMinutes !== undefined) await setState('autoMode/cdMinutes', Number(cdMinutes));
+    if (callSpeed !== undefined) await setState('autoMode/callSpeed', Number(callSpeed));
+    if (botWinPercent !== undefined) await setState('autoMode/botWinPercent', Number(botWinPercent));
+    res.json({ ok: true, msg: '✅ Settings saved!' });
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
+});
 
 app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
