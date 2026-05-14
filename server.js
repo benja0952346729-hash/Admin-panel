@@ -36,22 +36,42 @@ app.use(cors({
 app.use(express.static(__dirname));
 app.use(express.json());
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
-app.get('/health', (req, res) => res.json({ ok: true }));
+app.get('/health', async (req, res) => {
+  try {
+    const users = await pool.query('SELECT COUNT(*) FROM users');
+    const notifications = await pool.query('SELECT COUNT(*) FROM notifications');
+    const winners = await pool.query('SELECT COUNT(*) FROM all_winners');
+    const dbSize = await pool.query("SELECT pg_size_pretty(pg_database_size(current_database())) as size");
+    res.json({
+      ok: true,
+      users: Number(users.rows[0].count),
+      notifications: Number(notifications.rows[0].count),
+      winners: Number(winners.rows[0].count),
+      db_size: dbSize.rows[0].size
+    });
+  } catch(e) {
+    res.json({ ok: true });
+  }
+});
 app.get('/user-state', async (req, res) => {
   const { userId, firstName } = req.query;
   const displayName = firstName ? decodeURIComponent(firstName) : userId;
   if (!userId) return res.json({ balance: 0, isNew: false });
   try {
-    const insert = await pool.query(
-  `INSERT INTO users(uid,display,balance,is_bot)
-   VALUES($1,$2,0,false)
-   ON CONFLICT(uid) DO UPDATE SET display=$2 RETURNING uid`,
-  [userId, displayName]
-);
-    const isNew = insert.rows.length > 0;
-    if (isNew) {
-      await pool.query('UPDATE users SET balance=balance+20 WHERE uid=$1', [userId]);
-    }
+    // አስቀድሞ አለ ወይ ይፈትሻል
+const existing = await pool.query('SELECT uid FROM users WHERE uid=$1', [userId]);
+const isNew = existing.rows.length === 0;
+
+if(isNew) {
+  // አዲስ ተጫዋች — 20 ብር ይሰጠዋል
+  await pool.query(
+    'INSERT INTO users(uid,display,balance,is_bot) VALUES($1,$2,20,false)',
+    [userId, displayName]
+  );
+} else {
+  // ያለ ተጫዋች — display ብቻ ያዘምናል
+  await pool.query('UPDATE users SET display=$2 WHERE uid=$1', [userId, displayName]);
+}
     const u = await pool.query('SELECT balance FROM users WHERE uid=$1', [userId]);
     res.json({ balance: u.rows[0]?.balance || 0, isNew });
   } catch(e) { res.json({ balance: 0, isNew: false }); }
@@ -1125,4 +1145,22 @@ setTimeout(async () => {
     console.error('❌ Restore error:', e.message);
   }
 }, 3000);
+// ── AUTO CLEANUP ──
+setInterval(async () => {
+  try {
+    await pool.query(
+      'DELETE FROM notifications WHERE time < $1',
+      [Date.now() - (7 * 24 * 60 * 60 * 1000)]
+    );
+    await pool.query(
+      `DELETE FROM all_winners WHERE id NOT IN 
+      (SELECT id FROM all_winners ORDER BY time DESC LIMIT 500)`
+    );
+    console.log('✅ Auto cleanup done');
+  } catch(e) {
+    console.error('Cleanup error:', e.message);
+  }
+}, 24 * 60 * 60 * 1000);
+
+app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
 app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
