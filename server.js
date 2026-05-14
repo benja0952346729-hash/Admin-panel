@@ -142,7 +142,39 @@ function broadcast(data) {
 }
 // ══ TTS PROXY ══
 const SOUNDS_SERVER = 'https://game-production-7f86.up.railway.app';
+app.get('/tts/winner-announce', async (req, res) => {
+  try {
+    const response = await new Promise((resolve, reject) => {
+      https.get(`${SOUNDS_SERVER}/tts/winner-announce`, (r) => {
+        const chunks = [];
+        r.on('data', chunk => chunks.push(chunk));
+        r.on('end', () => resolve({ buffer: Buffer.concat(chunks) }));
+        r.on('error', reject);
+      }).on('error', reject);
+    });
+    res.set('Content-Type', 'audio/mpeg');
+    res.send(response.buffer);
+  } catch(e) {
+    res.status(500).json({ error: 'TTS failed' });
+  }
+});
 
+app.get('/tts/bingo', async (req, res) => {
+  try {
+    const response = await new Promise((resolve, reject) => {
+      https.get(`${SOUNDS_SERVER}/tts/bingo`, (r) => {
+        const chunks = [];
+        r.on('data', chunk => chunks.push(chunk));
+        r.on('end', () => resolve({ buffer: Buffer.concat(chunks) }));
+        r.on('error', reject);
+      }).on('error', reject);
+    });
+    res.set('Content-Type', 'audio/mpeg');
+    res.send(response.buffer);
+  } catch(e) {
+    res.status(500).json({ error: 'TTS failed' });
+  }
+});
 app.get('/tts/number/:n', async (req, res) => {
   const n = parseInt(req.params.n);
   if (isNaN(n) || n < 1 || n > 75)
