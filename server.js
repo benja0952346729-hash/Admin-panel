@@ -805,12 +805,14 @@ async function startAutoGame() {
 // ✅ NEW: Bots ማከያ function
 async function addBotsIfNeeded() {
   try {
-    const smartBot = await getState('smartBot');
-    if (!smartBot?.enabled) return;
+    const enabled = await getState('smartBot/enabled');
+    if (!enabled) return;
+
+    const smartBotState = await getState('smartBot');
+    const minCards = smartBotState?.minCards || 5;
 
     const allCards = (await getState('game/confirmedNumbers')) || {};
     const realPlayerCount = Object.keys(allCards).length;
-    const minCards = smartBot.minCards || 5;
     const botsNeeded = Math.max(0, minCards - realPlayerCount);
     if (botsNeeded === 0) return;
 
@@ -824,7 +826,6 @@ async function addBotsIfNeeded() {
         'INSERT INTO users(uid,display,balance,is_bot) VALUES($1,$2,$3,true) ON CONFLICT(uid) DO UPDATE SET display=$2',
         [botId, botName, bet * 10]
       );
-      // Random card ID
       const cardId = String(Math.floor(Math.random() * 900000) + 100000);
       if (!allCards[cardId]) {
         allCards[cardId] = botId;
@@ -836,12 +837,11 @@ async function addBotsIfNeeded() {
     await setState('game/prize', Math.floor(bet * total * (pct / 100)));
     await setState('game/total', bet * total);
     await updateAnalytics('botBet', bet * botsNeeded);
-    console.log(`🤖 Added ${botsNeeded} bots. Total cards: ${total}`);
+    console.log(`🤖 Added ${botsNeeded} bots. Total cards: ${total}, botBet: +${bet * botsNeeded}`);
   } catch(e) {
     console.error('❌ addBotsIfNeeded error:', e.message);
   }
 }
-
 async function autoCallNumber(speed) {
   if (!autoModeOn) return;
   clearInterval(callTimer);
