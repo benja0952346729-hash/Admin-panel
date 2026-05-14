@@ -1243,6 +1243,7 @@ app.post('/admin/auto-stop', async (req, res) => {
     autoModeOn = false;
     clearAllTimers();
     await setState('autoMode/phase', 'idle');
+    await setState('game/countdown', { active: false });
     res.json({ ok: true, msg: '✅ Auto mode stopped!' });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
