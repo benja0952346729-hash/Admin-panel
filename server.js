@@ -1258,5 +1258,25 @@ app.post('/admin/set-settings', async (req, res) => {
     res.json({ ok: true, msg: '✅ Settings saved!' });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
+app.post('/set-state', async (req, res) => {
+  try {
+    const { key, value } = req.body;
+    await setState(key, value);
+    res.json({ ok: true });
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
+});
+
+app.post('/start-auto', async (req, res) => {
+  try {
+    const { cdMinutes, callSpeed } = req.body;
+    if(cdMinutes) await setState('autoMode/cdMinutes', Number(cdMinutes));
+    if(callSpeed) await setState('autoMode/callSpeed', Number(callSpeed));
+    await setState('autoMode/on', true);
+    autoModeOn = true;
+    autoCdMinutes = cdMinutes || autoCdMinutes;
+    startAutoCountdown();
+    res.json({ ok: true, msg: '✅ Auto started!' });
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
+});
 
 app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
