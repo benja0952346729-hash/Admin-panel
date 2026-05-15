@@ -369,6 +369,10 @@ app.post('/withdrawal-action', async (req, res) => {
     if (action === 'approve') {
       await updateAnalytics('totalWithdrawals', amount);
       await pool.query(
+        "UPDATE game_state SET value='0' WHERE key=$1",
+        [`users/${uid}/pending_withdrawal`]
+      );
+      await pool.query(
         'INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
         [uid, `✅ ${amount} ብር withdrawal ተፈቀደ! በቅርቡ ይደርሳል።`, Date.now()]
       );
@@ -1446,47 +1450,6 @@ app.post('/db-push', async (req, res) => {
     res.json({ ok: true, key });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
-// ══ DB-GET ══
-app.get('/db-get', async (req, res) => {
-  try {
-    const { path } = req.query;
-    const r = await pool.query('SELECT value FROM game_state WHERE key=$1', [path]);
-    if (!r.rows.length) return res.json(null);
-    try { res.json(JSON.parse(r.rows[0].value)); }
-    catch { res.json(r.rows[0].value); }
-  } catch(e) { res.json(null); }
-});
 
-// ══ DB-SET ══
-app.post('/db-set', async (req, res) => {
-  try {
-    const { path, value } = req.body;
-    if (value === null || value === undefined) {
-      await pool.query('DELETE FROM game_state WHERE key=$1', [path]);
-    } else {
-      await pool.query(
-        'INSERT INTO game_state(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2',
-        [path, JSON.stringify(value)]
-      );
-    }
-    res.json({ ok: true });
-  } catch(e) { res.json({ ok: false }); }
-});
-
-// ══ DB-PUSH ══
-app.post('/db-push', async (req, res) => {
-  try {
-    const { path, value } = req.body;
-    const r = await pool.query('SELECT value FROM game_state WHERE key=$1', [path]);
-    const existing = r.rows.length ? JSON.parse(r.rows[0].value) : {};
-    const key = String(Date.now()) + Math.floor(Math.random()*1000);
-    existing[key] = value;
-    await pool.query(
-      'INSERT INTO game_state(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2',
-      [path, JSON.stringify(existing)]
-    );
-    res.json({ key });
-  } catch(e) { res.json({ key: String(Date.now()) }); }
-});
 
 app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
