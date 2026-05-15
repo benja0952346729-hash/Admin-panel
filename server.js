@@ -427,14 +427,12 @@ app.post('/change-agent-pass', async (req, res) => {
 
 app.post('/remove-bots', async (req, res) => {
   try {
-    // DB ከ bots አጸዳ
-    await pool.query('DELETE FROM users WHERE is_bot = true');
-    
-    // game/confirmedNumbers ከ bot cards አጸዳ
-    const allCards = (await getState('game/confirmedNumbers')) || {};
+    // መጀመሪያ bot ids ያስቀምጥ
     const botUsers = await pool.query('SELECT uid FROM users WHERE is_bot = true');
     const botIds = new Set(botUsers.rows.map(r => r.uid));
-    
+
+    // game/confirmedNumbers ከ bot cards አጸዳ
+    const allCards = (await getState('game/confirmedNumbers')) || {};
     const cleanCards = {};
     for (let cardId in allCards) {
       if (!botIds.has(String(allCards[cardId]))) {
@@ -442,6 +440,9 @@ app.post('/remove-bots', async (req, res) => {
       }
     }
     await setState('game/confirmedNumbers', cleanCards);
+
+    // ከዚያ bots ከ DB ሰርዝ
+    await pool.query('DELETE FROM users WHERE is_bot = true');
 
     res.json({ ok: true });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
@@ -525,7 +526,14 @@ async function loadCloudinarySounds() {
     req.end();
   });
 }
-
+app.post('/clear-analytics', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM analytics');
+    await setState('analytics/history', []);
+    await setState('analytics/lastFullReset', Date.now());
+    res.json({ ok: true, msg: '✅ Analytics cleared!' });
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
+});
 app.get('/get-config', async (req, res) => {
   try {
     const r = await pool.query("SELECT value FROM game_state WHERE key='adminConfig'");
@@ -910,7 +918,7 @@ async function autoCallNumber(speed) {
   const neededNums = generateBoard(Number(targetCard.cardId)).filter(n => n !== 'FREE');
   const allBoards = {};
   for (let cardId in cardInfoMap) allBoards[cardId] = generateBoard(Number(cardId));
-
+  const noBotBias = (await getState('autoMode/noBotBias')) ?? 0.50;
   callTimer = setInterval(async () => {
     try {
       if (!autoModeOn) { clearInterval(callTimer); return; }
@@ -950,7 +958,6 @@ async function autoCallNumber(speed) {
       const safeNeeded = neededRemaining.filter(n => safeRemaining.includes(n));
 
       let n;
-      const noBotBias = (await getState('autoMode/noBotBias')) ?? 0.50;
       const rand = Math.random();
       if (safeNeeded.length > 0 && rand < noBotBias)
         n = safeNeeded[Math.floor(Math.random() * safeNeeded.length)];
