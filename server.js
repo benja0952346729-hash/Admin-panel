@@ -1400,5 +1400,93 @@ app.post('/agent-verify', async (req, res) => {
     res.json({ ok: true, agentName: name });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
+// ══ DB ENDPOINTS — bot ጋር compatibility ══
+app.get('/db-get', async (req, res) => {
+  try {
+    const { path } = req.query;
+    if (!path) return res.json(null);
+    const r = await pool.query('SELECT value FROM game_state WHERE key=$1', [path]);
+    if (!r.rows.length) return res.json(null);
+    try { return res.json(JSON.parse(r.rows[0].value)); }
+    catch { return res.json(r.rows[0].value); }
+  } catch(e) { res.json(null); }
+});
+
+app.post('/db-set', async (req, res) => {
+  try {
+    const { path, value } = req.body;
+    if (!path) return res.json({ ok: false });
+    if (value === null || value === undefined) {
+      await pool.query('DELETE FROM game_state WHERE key=$1', [path]);
+    } else {
+      await pool.query(
+        'INSERT INTO game_state(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2',
+        [path, JSON.stringify(value)]
+      );
+    }
+    res.json({ ok: true });
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
+});
+
+app.post('/db-push', async (req, res) => {
+  try {
+    const { path, value } = req.body;
+    if (!path) return res.json({ ok: false });
+    const r = await pool.query('SELECT value FROM game_state WHERE key=$1', [path]);
+    let existing = {};
+    if (r.rows.length) {
+      try { existing = JSON.parse(r.rows[0].value); } catch { existing = {}; }
+    }
+    const key = String(Date.now()) + Math.random().toString(36).slice(2,6);
+    existing[key] = value;
+    await pool.query(
+      'INSERT INTO game_state(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2',
+      [path, JSON.stringify(existing)]
+    );
+    res.json({ ok: true, key });
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
+});
+// ══ DB-GET ══
+app.get('/db-get', async (req, res) => {
+  try {
+    const { path } = req.query;
+    const r = await pool.query('SELECT value FROM game_state WHERE key=$1', [path]);
+    if (!r.rows.length) return res.json(null);
+    try { res.json(JSON.parse(r.rows[0].value)); }
+    catch { res.json(r.rows[0].value); }
+  } catch(e) { res.json(null); }
+});
+
+// ══ DB-SET ══
+app.post('/db-set', async (req, res) => {
+  try {
+    const { path, value } = req.body;
+    if (value === null || value === undefined) {
+      await pool.query('DELETE FROM game_state WHERE key=$1', [path]);
+    } else {
+      await pool.query(
+        'INSERT INTO game_state(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2',
+        [path, JSON.stringify(value)]
+      );
+    }
+    res.json({ ok: true });
+  } catch(e) { res.json({ ok: false }); }
+});
+
+// ══ DB-PUSH ══
+app.post('/db-push', async (req, res) => {
+  try {
+    const { path, value } = req.body;
+    const r = await pool.query('SELECT value FROM game_state WHERE key=$1', [path]);
+    const existing = r.rows.length ? JSON.parse(r.rows[0].value) : {};
+    const key = String(Date.now()) + Math.floor(Math.random()*1000);
+    existing[key] = value;
+    await pool.query(
+      'INSERT INTO game_state(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2',
+      [path, JSON.stringify(existing)]
+    );
+    res.json({ key });
+  } catch(e) { res.json({ key: String(Date.now()) }); }
+});
 
 app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
