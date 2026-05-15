@@ -1450,6 +1450,15 @@ app.post('/db-push', async (req, res) => {
     res.json({ ok: true, key });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
-
+app.get('/fix-pending', async (req, res) => {
+  try {
+    const { uid } = req.query;
+    await pool.query(
+      "INSERT INTO game_state(key,value) VALUES($1,'0') ON CONFLICT(key) DO UPDATE SET value='0'",
+      [`users/${uid}/pending_withdrawal`]
+    );
+    res.json({ ok: true });
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
+});
 
 app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
