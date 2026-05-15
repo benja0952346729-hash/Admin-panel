@@ -372,9 +372,12 @@ app.post('/withdrawal-action', async (req, res) => {
         "UPDATE game_state SET value='0' WHERE key=$1",
         [`users/${uid}/pending_withdrawal`]
       );
+      const wd = allWd[key];
+      const method = wd?.method || 'ባንክ';
+      const account = wd?.account || '—';
       await pool.query(
         'INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
-        [uid, `✅ ${amount} ብር withdrawal ተፈቀደ! በቅርቡ ይደርሳል።`, Date.now()]
+        [uid, `✅ ${amount} ብር በ ${method} ተላከ!\n📋 Account: ${account}`, Date.now()]
       );
     } else {
       await pool.query('UPDATE users SET balance=balance+$1 WHERE uid=$2', [amount, uid]);
