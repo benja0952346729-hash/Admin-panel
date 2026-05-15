@@ -857,7 +857,8 @@ async function autoCallNumber(speed) {
   // ══ ✅ FIXED: realBetsTotal — real players ብቻ ══
   const bet = (await getState('game/bet')) || 0;
   const gamePct = (await getState('game/percent')) || 80;
-  const realBetsTotal = bet * realCards.length;  // ✅ real players ብቻ
+  const realBetsTotal = bet * realCards.length;
+  const botBetsTotal  = bet * botCards.length;
 
   // prize = ሁሉ cards (real + bot) × bet × pct — display ለ players
   const totalCards = Object.keys(allCards).length;
@@ -896,7 +897,7 @@ async function autoCallNumber(speed) {
       if (pend && !pend.announced) {
         clearInterval(callTimer);
         // ✅ realBetsTotal pass ይደረጋል announceWinner ዉስጥ ለ profit ሒሳብ
-        startAutoAnnounce(realBetsTotal);
+        startAutoAnnounce(realBetsTotal, botBetsTotal);
         return;
       }
 
@@ -951,14 +952,14 @@ async function autoCallNumber(speed) {
         console.log(`🏆 Winner found after ${calledNumbers.length} calls`);
         await setState('game/pendingWinner', { winners, prize, announced: false, time: Date.now() });
         // ✅ realBetsTotal pass ይደረጋል
-        startAutoAnnounce(realBetsTotal);
+        startAutoAnnounce(realBetsTotal, botBetsTotal);
       }
     } catch(e) { console.error('❌ callNumber error:', e.message); }
   }, speed);
 }
 
 // ✅ realBetsTotal parameter ተጨምሯል
-async function startAutoAnnounce(realBetsTotal) {
+async function startAutoAnnounce(realBetsTotal, botBetsTotal) {
   if (!autoModeOn) return;
   clearAllTimers();
   await setState('autoMode/phase', 'announcing');
@@ -970,14 +971,14 @@ async function startAutoAnnounce(realBetsTotal) {
     if (count <= 0) {
       clearInterval(announceTimer);
       announceTimer = null;
-      await announceWinner(realBetsTotal);
+      await announceWinner(realBetsTotal, botBetsTotal);
       await scheduleNextRound();
     }
   }, 1000);
 }
 
 // ══ ✅ FIXED announceWinner — ትክክለኛ profit ሒሳብ ══
-async function announceWinner(realBetsTotal) {
+async function announceWinner(realBetsTotal, botBetsTotal) {
   try {
     const data = await getState('game/pendingWinner');
     if (!data) return;
@@ -1043,10 +1044,14 @@ async function announceWinner(realBetsTotal) {
     // totalPaidOut = real players ብቻ የተከፈለ
     await updateAnalytics('totalPaidOut', realWinShare);
 
-    // ✅ roundProfit = realBetsTotal - realWinShare
-    //    Bot ካሸነፈ:    realBetsTotal - 0     = +ብር ✅
-    //    Player ካሸነፈ: realBetsTotal - prize = ±ብር ✅
-    const roundProfit = realBetsTotal - realWinShare;
+    // ══ ትክክለኛ profit ሒሳብ ══
+    // houseCut  = total × (100% - prize%)  ← ሁሌም ቤቱ
+    // Bot ካሸነፈ:    houseCut + prize = total  (prize ቤቱ ነው)
+    // Player ካሸነፈ: houseCut - botBetsTotal  (bot bet ወጪ ነው)
+    const houseCut = Math.floor((realBetsTotal + botBetsTotal) * (1 - (gamePct / 100)));
+    const roundProfit = botWon
+      ? houseCut + prize                  // bot ካሸነፈ: houseCut + prize(ቤቱ ነው)
+      : houseCut - botBetsTotal;          // player ካሸነፈ: houseCut - bot bet(ወጪ)
     await updateAnalytics('totalProfit', roundProfit);
 
     // Daily history
@@ -1067,7 +1072,7 @@ async function announceWinner(realBetsTotal) {
         playerWins: botWon ? 0 : 1
       });
     }
-    await setState('analytics/history', history.slice(-30));
+    await setState('analytics/history', history.slice(-5));
 
     console.log(`✅ Round done! realBets:${realBetsTotal} paidOut:${realWinShare} profit:${roundProfit} botWon:${botWon}`);
   } catch(e) { console.error('❌ announceWinner error:', e.message); }
@@ -1202,6 +1207,17 @@ setInterval(async () => {
     await pool.query('DELETE FROM notifications WHERE time < $1', [Date.now() - (7 * 24 * 60 * 60 * 1000)]);
     await pool.query(`DELETE FROM all_winners WHERE id NOT IN (SELECT id FROM all_winners ORDER BY time DESC LIMIT 500)`);
     await pool.query('DELETE FROM promotions WHERE active=false AND created_at < $1', [Date.now() - (30 * 24 * 60 * 60 * 1000)]);
+
+    // ✅ 5 ቀን analytics reset
+    const lastReset = (await getState('analytics/lastFullReset')) || 0;
+    const fiveDays = 5 * 24 * 60 * 60 * 1000;
+    if (Date.now() - lastReset >= fiveDays) {
+      await pool.query('DELETE FROM analytics');
+      await setState('analytics/history', []);
+      await setState('analytics/lastFullReset', Date.now());
+      console.log('🔄 Analytics full reset (5 days)');
+    }
+
     console.log('✅ Auto cleanup done');
   } catch(e) { console.error('Cleanup error:', e.message); }
 }, 24 * 60 * 60 * 1000);
