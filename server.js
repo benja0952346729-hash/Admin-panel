@@ -7,11 +7,11 @@ const { Pool } = require('pg');
 
 const app = express();
 
-
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
+
 // ══ ANALYTICS HELPER ══
 async function updateAnalytics(key, amount) {
   try {
@@ -31,7 +31,14 @@ async function getAnalytics(key) {
   } catch(e) { return 0; }
 }
 
-pool.query(`CREATE TABLE IF NOT EXISTS game_state (key TEXT PRIMARY KEY, value TEXT); CREATE TABLE IF NOT EXISTS users (uid TEXT PRIMARY KEY, display TEXT, balance NUMERIC DEFAULT 0, is_bot BOOLEAN DEFAULT false); CREATE TABLE IF NOT EXISTS promotions (id SERIAL PRIMARY KEY, text TEXT, photo_url TEXT, target_type TEXT, group_id TEXT, interval_ms BIGINT, next_send_at BIGINT, last_sent_at BIGINT, active BOOLEAN DEFAULT true, created_at BIGINT); CREATE TABLE IF NOT EXISTS notifications (id SERIAL PRIMARY KEY, uid TEXT, message TEXT, time BIGINT, read BOOLEAN DEFAULT false); CREATE TABLE IF NOT EXISTS analytics (key TEXT PRIMARY KEY, value NUMERIC DEFAULT 0); CREATE TABLE IF NOT EXISTS all_winners (id SERIAL PRIMARY KEY, uid TEXT, display_name TEXT, card_id TEXT, prize NUMERIC, is_bot BOOLEAN, time BIGINT);`)
+pool.query(`
+  CREATE TABLE IF NOT EXISTS game_state (key TEXT PRIMARY KEY, value TEXT);
+  CREATE TABLE IF NOT EXISTS users (uid TEXT PRIMARY KEY, display TEXT, balance NUMERIC DEFAULT 0, is_bot BOOLEAN DEFAULT false);
+  CREATE TABLE IF NOT EXISTS promotions (id SERIAL PRIMARY KEY, text TEXT, photo_url TEXT, target_type TEXT, group_id TEXT, interval_ms BIGINT, next_send_at BIGINT, last_sent_at BIGINT, active BOOLEAN DEFAULT true, created_at BIGINT);
+  CREATE TABLE IF NOT EXISTS notifications (id SERIAL PRIMARY KEY, uid TEXT, message TEXT, time BIGINT, read BOOLEAN DEFAULT false);
+  CREATE TABLE IF NOT EXISTS analytics (key TEXT PRIMARY KEY, value NUMERIC DEFAULT 0);
+  CREATE TABLE IF NOT EXISTS all_winners (id SERIAL PRIMARY KEY, uid TEXT, display_name TEXT, card_id TEXT, prize NUMERIC, is_bot BOOLEAN, time BIGINT);
+`)
 .then(() => console.log('✅ DB ready!'))
 .catch(e => console.error('DB error:', e.message));
 
@@ -39,6 +46,7 @@ async function getState(key) {
   const r = await pool.query('SELECT value FROM game_state WHERE key=$1', [key]);
   return r.rows.length ? JSON.parse(r.rows[0].value) : null;
 }
+
 async function setState(key, value) {
   await pool.query(
     'INSERT INTO game_state(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2',
@@ -46,14 +54,12 @@ async function setState(key, value) {
   );
 }
 
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type']
-}));
+app.use(cors({ origin: '*', methods: ['GET', 'POST'], allowedHeaders: ['Content-Type'] }));
 app.use(express.static(__dirname));
 app.use(express.json());
+
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
+
 app.get('/health', async (req, res) => {
   try {
     const users = await pool.query('SELECT COUNT(*) FROM users');
@@ -71,32 +77,29 @@ app.get('/health', async (req, res) => {
     res.json({ ok: true });
   }
 });
+
 app.get('/user-state', async (req, res) => {
   const { userId, firstName } = req.query;
   const displayName = firstName ? decodeURIComponent(firstName) : userId;
   if (!userId) return res.json({ balance: 0, isNew: false });
   try {
-    // አስቀድሞ አለ ወይ ይፈትሻል
-const existing = await pool.query('SELECT uid FROM users WHERE uid=$1', [userId]);
-const isNew = existing.rows.length === 0;
-
-if(isNew) {
-  // አዲስ ተጫዋች — 20 ብር ይሰጠዋል
-  await pool.query(
-    'INSERT INTO users(uid,display,balance,is_bot) VALUES($1,$2,20,false)',
-    [userId, displayName]
-  );
-} else {
-  // ያለ ተጫዋች — display ብቻ ያዘምናል
-  await pool.query('UPDATE users SET display=$2 WHERE uid=$1', [userId, displayName]);
-}
+    const existing = await pool.query('SELECT uid FROM users WHERE uid=$1', [userId]);
+    const isNew = existing.rows.length === 0;
+    if (isNew) {
+      await pool.query(
+        'INSERT INTO users(uid,display,balance,is_bot) VALUES($1,$2,20,false)',
+        [userId, displayName]
+      );
+    } else {
+      await pool.query('UPDATE users SET display=$2 WHERE uid=$1', [userId, displayName]);
+    }
     const u = await pool.query('SELECT balance FROM users WHERE uid=$1', [userId]);
     res.json({ balance: u.rows[0]?.balance || 0, isNew });
   } catch(e) { res.json({ balance: 0, isNew: false }); }
 });
-app.post('/set-not-new', async (req, res) => {
-  res.json({ ok: true });
-});
+
+app.post('/set-not-new', async (req, res) => { res.json({ ok: true }); });
+
 app.get('/all-winners', async (req, res) => {
   try {
     const r = await pool.query(
@@ -106,6 +109,7 @@ app.get('/all-winners', async (req, res) => {
     res.json({ winners: r.rows, round });
   } catch(e) { res.json({ winners: [], round: 1 }); }
 });
+
 app.post('/submit-payment',
   multer({ storage: multer.memoryStorage() }).single('photo'),
   async (req, res) => {
@@ -135,10 +139,7 @@ app.post('/submit-payment',
         const req2 = require('https').request(opts, r => {
           let d = '';
           r.on('data', c => d += c);
-          r.on('end', () => {
-            try { resolve(JSON.parse(d).secure_url || ''); }
-            catch { resolve(''); }
-          });
+          r.on('end', () => { try { resolve(JSON.parse(d).secure_url || ''); } catch { resolve(''); } });
         });
         req2.on('error', () => resolve(''));
         req2.write(body); req2.end();
@@ -152,34 +153,29 @@ app.post('/submit-payment',
         time: new Date().toISOString()
       };
       await setState('bot/payments', existing);
-
       res.json({ ok: true });
     } catch(e) { res.json({ ok: false, msg: e.message }); }
   }
 );
-// SSE clients
-let sseClients = [];
 
+// SSE
+let sseClients = [];
 app.get('/events', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
-
   sseClients.push(res);
-
-  req.on('close', () => {
-    sseClients = sseClients.filter(c => c !== res);
-  });
+  req.on('close', () => { sseClients = sseClients.filter(c => c !== res); });
 });
 
 function broadcast(data) {
-  sseClients.forEach(client => {
-    client.write(`data: ${JSON.stringify(data)}\n\n`);
-  });
+  sseClients.forEach(client => { client.write(`data: ${JSON.stringify(data)}\n\n`); });
 }
-// ══ TTS PROXY ══
+
+// TTS PROXY
 const SOUNDS_SERVER = 'https://game-production-7f86.up.railway.app';
+
 app.get('/tts/winner-announce', async (req, res) => {
   try {
     const response = await new Promise((resolve, reject) => {
@@ -192,9 +188,7 @@ app.get('/tts/winner-announce', async (req, res) => {
     });
     res.set('Content-Type', 'audio/mpeg');
     res.send(response.buffer);
-  } catch(e) {
-    res.status(500).json({ error: 'TTS failed' });
-  }
+  } catch(e) { res.status(500).json({ error: 'TTS failed' }); }
 });
 
 app.get('/tts/bingo', async (req, res) => {
@@ -209,15 +203,13 @@ app.get('/tts/bingo', async (req, res) => {
     });
     res.set('Content-Type', 'audio/mpeg');
     res.send(response.buffer);
-  } catch(e) {
-    res.status(500).json({ error: 'TTS failed' });
-  }
+  } catch(e) { res.status(500).json({ error: 'TTS failed' }); }
 });
+
 app.get('/tts/number/:n', async (req, res) => {
   const n = parseInt(req.params.n);
   if (isNaN(n) || n < 1 || n > 75)
     return res.status(400).json({ error: 'Invalid number' });
-  
   try {
     const response = await new Promise((resolve, reject) => {
       https.get(`${SOUNDS_SERVER}/tts/number/${n}`, (r) => {
@@ -227,12 +219,9 @@ app.get('/tts/number/:n', async (req, res) => {
         r.on('error', reject);
       }).on('error', reject);
     });
-    
     res.set('Content-Type', 'audio/mpeg');
     res.send(response.buffer);
-  } catch(e) {
-    res.status(500).json({ error: 'TTS failed' });
-  }
+  } catch(e) { res.status(500).json({ error: 'TTS failed' }); }
 });
 
 app.get('/game-state', async (req, res) => {
@@ -242,8 +231,8 @@ app.get('/game-state', async (req, res) => {
     rows.rows.forEach(r => {
       const keys = r.key.split('/');
       let obj = result;
-      for(let i = 0; i < keys.length - 1; i++){
-        if(!obj[keys[i]]) obj[keys[i]] = {};
+      for (let i = 0; i < keys.length - 1; i++) {
+        if (!obj[keys[i]]) obj[keys[i]] = {};
         obj = obj[keys[i]];
       }
       try { obj[keys[keys.length-1]] = JSON.parse(r.value); }
@@ -264,6 +253,7 @@ app.get('/game-state', async (req, res) => {
     flat.percent = result.game?.percent;
     flat.confirmedNumbers = result.game?.confirmedNumbers;
     flat.paid = result.game?.paid;
+
     const usersRes = await pool.query('SELECT uid, display FROM users');
     const displayNames = {};
     usersRes.rows.forEach(r => { displayNames[r.uid] = r.display; });
@@ -292,24 +282,25 @@ app.get('/game-state', async (req, res) => {
     flat['bot/settings/telebirr_account'] = result.bot?.settings?.telebirr_account;
     flat['confirmedNumbers'] = flat.confirmedNumbers;
 
-    // Analytics — from DB directly
     const analyticsRows = await pool.query('SELECT key, value FROM analytics');
     const analyticsData = {};
     analyticsRows.rows.forEach(r => { analyticsData[r.key] = Number(r.value); });
 
-    flat['analytics/totalCollected'] = analyticsData['totalCollected'] || 0;
-    flat['analytics/totalPaidOut'] = analyticsData['totalPaidOut'] || 0;
-    flat['analytics/totalDeposits'] = analyticsData['totalDeposits'] || 0;
+    flat['analytics/totalCollected']   = analyticsData['totalCollected']   || 0;
+    flat['analytics/totalPaidOut']     = analyticsData['totalPaidOut']     || 0;
+    flat['analytics/totalDeposits']    = analyticsData['totalDeposits']    || 0;
     flat['analytics/totalWithdrawals'] = analyticsData['totalWithdrawals'] || 0;
-    flat['analytics/totalProfit'] = analyticsData['totalProfit'] || 0;
-    flat['analytics/botWinProfit'] = analyticsData['botWinProfit'] || 0;
-    flat['analytics/botBet'] = analyticsData['botBet'] || 0;
-    flat['analytics/history'] = (await getState('analytics/history')) || [];
+    flat['analytics/totalProfit']      = analyticsData['totalProfit']      || 0;
+    flat['analytics/houseCut']         = analyticsData['houseCut']         || 0;
+    flat['analytics/botWinProfit']     = analyticsData['botWinProfit']     || 0;
+    flat['analytics/botBet']           = analyticsData['botBet']           || 0;
+    flat['analytics/history']          = (await getState('analytics/history')) || [];
 
     res.json(flat);
   } catch(e) { res.json({}); }
 });
-// GET /withdrawals
+
+// ══ WITHDRAWALS ══
 app.get('/withdrawals', async (req, res) => {
   try {
     const r = await pool.query("SELECT value FROM game_state WHERE key='bot/withdrawals'");
@@ -318,7 +309,6 @@ app.get('/withdrawals', async (req, res) => {
   } catch(e) { res.json({ withdrawals: {} }); }
 });
 
-// GET /agents
 app.get('/agents', async (req, res) => {
   try {
     const r = await pool.query("SELECT value FROM game_state WHERE key='agents'");
@@ -327,7 +317,6 @@ app.get('/agents', async (req, res) => {
   } catch(e) { res.json({}); }
 });
 
-// GET /promotions-list
 app.get('/promotions-list', async (req, res) => {
   try {
     const rows = await pool.query('SELECT * FROM promotions WHERE active=true ORDER BY created_at DESC');
@@ -335,7 +324,6 @@ app.get('/promotions-list', async (req, res) => {
   } catch(e) { res.json([]); }
 });
 
-// DELETE /promotions/:id
 app.post('/delete-promotion', async (req, res) => {
   try {
     const { id } = req.body;
@@ -344,49 +332,66 @@ app.post('/delete-promotion', async (req, res) => {
   } catch(e) { res.json({ ok: false }); }
 });
 
-// POST /give-balance
 app.post('/give-balance', async (req, res) => {
   try {
     const { uid, amount } = req.body;
-    await pool.query('INSERT INTO users(uid,display,balance) VALUES($1,$2,$3) ON CONFLICT(uid) DO UPDATE SET balance=users.balance+$3', [uid, uid, amount]);
+    await pool.query(
+      'INSERT INTO users(uid,display,balance) VALUES($1,$2,$3) ON CONFLICT(uid) DO UPDATE SET balance=users.balance+$3',
+      [uid, uid, amount]
+    );
+    const r = await pool.query('SELECT balance FROM users WHERE uid=$1', [uid]);
+    const newBal = r.rows[0]?.balance || 0;
+    broadcast({ type: 'balance', uid, balance: newBal });
     res.json({ ok: true });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
 
-// POST /save-accounts
 app.post('/save-accounts', async (req, res) => {
   try {
     const { cbe, telebirr } = req.body;
-    if(cbe) await setState('bot/settings/cbe_account', cbe);
-    if(telebirr) await setState('bot/settings/telebirr_account', telebirr);
+    if (cbe) await setState('bot/settings/cbe_account', cbe);
+    if (telebirr) await setState('bot/settings/telebirr_account', telebirr);
     res.json({ ok: true });
   } catch(e) { res.json({ ok: false }); }
 });
 
-// POST /withdrawal-action
 app.post('/withdrawal-action', async (req, res) => {
   try {
     const { key, action, uid, amount } = req.body;
-    const allWd = JSON.parse((await pool.query("SELECT value FROM game_state WHERE key='bot/withdrawals'")).rows[0]?.value || '{}');
-    if(!allWd[key]) return res.json({ ok: false, msg: 'Not found' });
+    const allWd = JSON.parse(
+      (await pool.query("SELECT value FROM game_state WHERE key='bot/withdrawals'")).rows[0]?.value || '{}'
+    );
+    if (!allWd[key]) return res.json({ ok: false, msg: 'Not found' });
+
     allWd[key].status = action === 'approve' ? 'approved' : 'rejected';
     await setState('bot/withdrawals', allWd);
-    if(action === 'approve') {
-  await updateAnalytics('totalWithdrawals', amount);
-      await pool.query('INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)', [uid, `✅ ${amount} ብር ተልኳል!`, Date.now()]);
+
+    if (action === 'approve') {
+      await updateAnalytics('totalWithdrawals', amount);
+      await pool.query(
+        'INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
+        [uid, `✅ ${amount} ብር withdrawal ተፈቀደ! በቅርቡ ይደርሳል።`, Date.now()]
+      );
     } else {
       await pool.query('UPDATE users SET balance=balance+$1 WHERE uid=$2', [amount, uid]);
-      await pool.query('INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)', [uid, `❌ Withdrawal rejected — ${amount} ብር ተመለሰ!`, Date.now()]);
+      const r = await pool.query('SELECT balance FROM users WHERE uid=$1', [uid]);
+      const newBal = r.rows[0]?.balance || 0;
+      broadcast({ type: 'balance', uid, balance: newBal });
+      await pool.query(
+        'INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
+        [uid, `❌ Withdrawal rejected — ${amount} ብር balance ላይ ተመለሰ!`, Date.now()]
+      );
     }
     res.json({ ok: true });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
 
-// POST /add-agent, /delete-agent, /change-agent-pass
 app.post('/add-agent', async (req, res) => {
   try {
     const { name, id_number } = req.body;
-    const agents = JSON.parse((await pool.query("SELECT value FROM game_state WHERE key='agents'")).rows[0]?.value || '{}');
+    const agents = JSON.parse(
+      (await pool.query("SELECT value FROM game_state WHERE key='agents'")).rows[0]?.value || '{}'
+    );
     agents[name] = { id_number };
     await setState('agents', agents);
     res.json({ ok: true });
@@ -396,7 +401,9 @@ app.post('/add-agent', async (req, res) => {
 app.post('/delete-agent', async (req, res) => {
   try {
     const { name } = req.body;
-    const agents = JSON.parse((await pool.query("SELECT value FROM game_state WHERE key='agents'")).rows[0]?.value || '{}');
+    const agents = JSON.parse(
+      (await pool.query("SELECT value FROM game_state WHERE key='agents'")).rows[0]?.value || '{}'
+    );
     delete agents[name];
     await setState('agents', agents);
     res.json({ ok: true });
@@ -410,13 +417,14 @@ app.post('/change-agent-pass', async (req, res) => {
     res.json({ ok: true });
   } catch(e) { res.json({ ok: false }); }
 });
+
 app.post('/remove-bots', async (req, res) => {
   try {
     await pool.query('DELETE FROM users WHERE is_bot = true');
     res.json({ ok: true });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
-// GET /unread-notifications
+
 app.get('/unread-notifications', async (req, res) => {
   try {
     const r = await pool.query(
@@ -426,7 +434,6 @@ app.get('/unread-notifications', async (req, res) => {
   } catch(e) { res.json([]); }
 });
 
-// POST /mark-notification-read
 app.post('/mark-notification-read', async (req, res) => {
   try {
     const { id } = req.body;
@@ -434,7 +441,7 @@ app.post('/mark-notification-read', async (req, res) => {
     res.json({ ok: true });
   } catch(e) { res.json({ ok: false }); }
 });
-// POST /update-balance
+
 app.post('/update-balance', async (req, res) => {
   try {
     const { uid, amount, type } = req.body;
@@ -450,7 +457,6 @@ app.post('/update-balance', async (req, res) => {
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
 
-// GET /get-balance
 app.get('/get-balance', async (req, res) => {
   try {
     const { uid } = req.query;
@@ -458,7 +464,8 @@ app.get('/get-balance', async (req, res) => {
     res.json({ balance: r.rows[0]?.balance || 0 });
   } catch(e) { res.json({ balance: 0 }); }
 });
-// ══ CLOUDINARY SOUNDS ══
+
+// ══ CLOUDINARY ══
 const CLOUDINARY_CLOUD = 'diado1bxi';
 const CLOUDINARY_API_KEY = '117446111831141';
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_SECRET || 'biCrRU-O4tFt_icW8ONKE5POXJk';
@@ -488,9 +495,7 @@ async function loadCloudinarySounds() {
             soundsMap[key] = r.secure_url;
           });
           console.log(`✅ Loaded ${Object.keys(soundsMap).length} sounds from Cloudinary`);
-        } catch(e) {
-          console.error('❌ Cloudinary parse error:', e.message);
-        }
+        } catch(e) { console.error('❌ Cloudinary parse error:', e.message); }
         resolve();
       });
     });
@@ -498,37 +503,36 @@ async function loadCloudinarySounds() {
     req.end();
   });
 }
+
 app.get('/get-config', async (req, res) => {
   try {
     const r = await pool.query("SELECT value FROM game_state WHERE key='adminConfig'");
-    const config = r.rows.length ? JSON.parse(r.rows[0].value) : {loginPassword:'1234', settingsPassword:'9999'};
+    const config = r.rows.length ? JSON.parse(r.rows[0].value) : { loginPassword: '1234', settingsPassword: '9999' };
     res.json(config);
-  } catch(e) {
-    res.json({loginPassword:'1234', settingsPassword:'9999'});
-  }
+  } catch(e) { res.json({ loginPassword: '1234', settingsPassword: '9999' }); }
 });
 
 app.post('/save-config', async (req, res) => {
   try {
     const { loginPassword, settingsPassword } = req.body;
     const config = { loginPassword, settingsPassword };
-    await pool.query("INSERT INTO game_state(key,value) VALUES('adminConfig',$1) ON CONFLICT(key) DO UPDATE SET value=$1", [JSON.stringify(config)]);
+    await pool.query(
+      "INSERT INTO game_state(key,value) VALUES('adminConfig',$1) ON CONFLICT(key) DO UPDATE SET value=$1",
+      [JSON.stringify(config)]
+    );
     res.json({ ok: true });
-  } catch(e) {
-    res.json({ ok: false, msg: e.message });
-  }
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
+
 app.get('/sounds-map', (req, res) => res.json(soundsMap));
 loadCloudinarySounds();
+
 app.post('/create-interval-promotion', multer({ storage: multer.memoryStorage() }).single('photo'), async (req, res) => {
   const { text, targetType, groupId, intervalMs } = req.body;
   const photoBuffer = req.file ? req.file.buffer : null;
-  
   if (!text && !photoBuffer) return res.json({ ok: false, msg: '❌ Message ወይም Photo ያስፈልጋል!' });
-
   try {
     let photoUrl = '';
-    
     if (photoBuffer) {
       const auth = Buffer.from(`${CLOUDINARY_API_KEY}:${CLOUDINARY_API_SECRET}`).toString('base64');
       const boundary = '----FormBoundary' + Date.now();
@@ -537,41 +541,28 @@ app.post('/create-interval-promotion', multer({ storage: multer.memoryStorage() 
         photoBuffer,
         Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="upload_preset"\r\n\r\nunsigned_preset\r\n--${boundary}--\r\n`)
       ]);
-      
       photoUrl = await new Promise((resolve) => {
         const options = {
           hostname: 'api.cloudinary.com',
           path: `/v1_1/${CLOUDINARY_CLOUD}/image/upload`,
           method: 'POST',
-          headers: {
-            'Content-Type': `multipart/form-data; boundary=${boundary}`,
-            'Content-Length': body.length,
-            'Authorization': `Basic ${auth}`
-          }
+          headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length, 'Authorization': `Basic ${auth}` }
         };
         const request = require('https').request(options, (r) => {
           let d = '';
           r.on('data', chunk => d += chunk);
-          r.on('end', () => {
-            try { resolve(JSON.parse(d).secure_url || ''); }
-            catch(e) { resolve(''); }
-          });
+          r.on('end', () => { try { resolve(JSON.parse(d).secure_url || ''); } catch(e) { resolve(''); } });
         });
         request.on('error', () => resolve(''));
-        request.write(body);
-        request.end();
+        request.write(body); request.end();
       });
     }
-
     await pool.query(
-  'INSERT INTO promotions(text,photo_url,target_type,group_id,interval_ms,next_send_at,active,created_at) VALUES($1,$2,$3,$4,$5,$6,true,$7)',
-  [text||'', photoUrl, targetType||'bot', groupId||'', Number(intervalMs)||3600000, Date.now()+Number(intervalMs), Date.now()]
-);
-
+      'INSERT INTO promotions(text,photo_url,target_type,group_id,interval_ms,next_send_at,active,created_at) VALUES($1,$2,$3,$4,$5,$6,true,$7)',
+      [text || '', photoUrl, targetType || 'bot', groupId || '', Number(intervalMs) || 3600000, Date.now() + Number(intervalMs), Date.now()]
+    );
     res.json({ ok: true, msg: '✅ Interval promotion ተጀምሯል!' });
-  } catch(e) {
-    res.json({ ok: false, msg: '❌ Error: ' + e.message });
-  }
+  } catch(e) { res.json({ ok: false, msg: '❌ Error: ' + e.message }); }
 });
 
 app.post('/send-promotion', multer({ storage: multer.memoryStorage() }).single('photo'), async (req, res) => {
@@ -581,79 +572,85 @@ app.post('/send-promotion', multer({ storage: multer.memoryStorage() }).single('
   try {
     await broadcastPromotion({ text, photoBuffer, targetType, groupId });
     res.json({ ok: true, msg: '✅ Promotion ተላከ!' });
-  } catch(e) {
-    res.json({ ok: false, msg: '❌ Error: ' + e.message });
-  }
+  } catch(e) { res.json({ ok: false, msg: '❌ Error: ' + e.message }); }
 });
 
 async function checkPromotions() {
-  const promos = (await pool.query('SELECT * FROM promotions WHERE active=true')).rows;
+  try {
+    const promos = (await pool.query('SELECT * FROM promotions WHERE active=true')).rows;
     const now = Date.now();
-    for (let key in promos) {
-      const p = promos[key];
-      if (!p.active) continue;
-      if (!p.nextSendAt) continue;
-      if (now < p.nextSendAt) continue;
+    for (const p of promos) {
+      if (!p.next_send_at) continue;
+      if (now < Number(p.next_send_at)) continue;
 
-      console.log(`📢 Sending interval promotion: ${key}`);
+      console.log(`📢 Sending interval promotion id=${p.id}`);
       try {
         await broadcastPromotion({
           text: p.text || '',
           photoBuffer: null,
-          photoUrl: p.photoUrl || '',
-          targetType: p.targetType || 'bot',
-          groupId: p.groupId || ''
+          photoUrl: p.photo_url || '',
+          targetType: p.target_type || 'bot',
+          groupId: p.group_id || ''
         });
         await pool.query(
-  'UPDATE promotions SET next_send_at=$1, last_sent_at=$2 WHERE id=$3',
-  [now + (p.intervalMs || 3600000), now, p.id]
-);
-        console.log(`✅ Promotion sent! Next in ${(p.intervalMs||3600000)/3600000}h`);
+          'UPDATE promotions SET next_send_at=$1, last_sent_at=$2 WHERE id=$3',
+          [now + (p.interval_ms || 3600000), now, p.id]
+        );
+        console.log(`✅ Promotion sent! id=${p.id}`);
       } catch(e) {
         console.error('❌ Promotion send error:', e.message);
         await pool.query(
           'UPDATE promotions SET next_send_at=$1 WHERE id=$2',
-          [now + (p.intervalMs || 3600000), p.id]
+          [now + (p.interval_ms || 3600000), p.id]
         );
       }
     }
+  } catch(e) {
+    console.error('❌ checkPromotions error:', e.message);
+  }
 }
 
 setInterval(checkPromotions, 60 * 1000);
 console.log('📢 Promotion interval scheduler started');
 
-// ══ CONFIRM CARD ══
 app.post('/confirm-card', async (req, res) => {
   const { userId, cardId } = req.body;
   if (!userId || !cardId) return res.json({ ok: false, msg: 'Missing data' });
   try {
     const bet = (await getState('game/bet')) || 0;
-const balRes = await pool.query('SELECT balance FROM users WHERE uid=$1', [userId]);
-const bal = balRes.rows.length ? Number(balRes.rows[0].balance) : 0;
+    const balRes = await pool.query('SELECT balance FROM users WHERE uid=$1', [userId]);
+    const bal = balRes.rows.length ? Number(balRes.rows[0].balance) : 0;
     if (bal < bet) return res.json({ ok: false, msg: '❌ Balance አንስተኛ ነው!' });
+
     const status = await getState('game/status');
-if (status?.started) return res.json({ ok: false, msg: '❌ Game ጀምሯል!' });
-  const allCards = (await getState('game/confirmedNumbers')) || {};
-const myCards = Object.values(allCards).filter(v => String(v) === String(userId));
-if (myCards.length >= 5) return res.json({ ok: false, msg: '❌ Max 5 cards!' });
-if (allCards[cardId]) return res.json({ ok: false, msg: '❌ Card ተይዟል!' });
-allCards[cardId] = userId;
-await setState('game/confirmedNumbers', allCards);
-await pool.query('UPDATE users SET balance = balance - $1 WHERE uid=$2', [bet, userId]);
-const total = Object.keys(allCards).length;
-const pct = (await getState('game/percent')) || 80;
-await setState('game/prize', Math.floor(bet * total * (pct/100)));
-await setState('game/total', bet * total);
-const currentPrize = await getState('game/prize');
-const currentBet = await getState('game/bet');
-const allC = (await getState('game/confirmedNumbers')) || {};
-const totalCards = Object.keys(allC).length;
-const totalPlayers = new Set(Object.values(allC)).size;
-broadcast({ type: 'card_taken', cardId, userId, prize: currentPrize, bet: currentBet, totalCards, totalPlayers });
+    if (status?.started) return res.json({ ok: false, msg: '❌ Game ጀምሯል!' });
+
+    const allCards = (await getState('game/confirmedNumbers')) || {};
+    const myCards = Object.values(allCards).filter(v => String(v) === String(userId));
+    if (myCards.length >= 5) return res.json({ ok: false, msg: '❌ Max 5 cards!' });
+    if (allCards[cardId]) return res.json({ ok: false, msg: '❌ Card ተይዟል!' });
+
+    allCards[cardId] = userId;
+    await setState('game/confirmedNumbers', allCards);
+    await pool.query('UPDATE users SET balance = balance - $1 WHERE uid=$2', [bet, userId]);
+
+    const total = Object.keys(allCards).length;
+    const pct = (await getState('game/percent')) || 80;
+    const prize = Math.floor(bet * total * (pct / 100));
+    await setState('game/prize', prize);
+    await setState('game/total', bet * total);
+
+    // ✅ real player card ሲያዝ ብቻ totalCollected ይጨምራል
+    await updateAnalytics('totalCollected', bet);
+
+    const currentBet = await getState('game/bet');
+    const allC = (await getState('game/confirmedNumbers')) || {};
+    const totalCards = Object.keys(allC).length;
+    const totalPlayers = new Set(Object.values(allC)).size;
+    broadcast({ type: 'card_taken', cardId, userId, prize, bet: currentBet, totalCards, totalPlayers });
+
     return res.json({ ok: true, msg: '✅ Card confirmed!' });
-  } catch (e) {
-    return res.json({ ok: false, msg: 'Error: ' + e.message });
-  }
+  } catch(e) { return res.json({ ok: false, msg: 'Error: ' + e.message }); }
 });
 
 // ══ STATE ══
@@ -708,11 +705,8 @@ function checkWin(board, called) {
 
 function wouldCloseColumnSoon(n, allBoards, called) {
   const colIndices = [
-    [0, 5, 10, 15, 20],
-    [1, 6, 11, 16, 21],
-    [2, 7, 12, 17, 22],
-    [3, 8, 13, 18, 23],
-    [4, 9, 14, 19, 24],
+    [0,5,10,15,20], [1,6,11,16,21], [2,7,12,17,22],
+    [3,8,13,18,23], [4,9,14,19,24],
   ];
   const simulatedCalled = [...called, n];
   for (let cardId in allBoards) {
@@ -732,7 +726,6 @@ function clearAllTimers() {
   clearInterval(announceTimer); announceTimer = null;
 }
 
-// ══ AUTO MODE ══
 setInterval(async () => {
   try {
     const val = await getState('autoMode/on');
@@ -745,13 +738,10 @@ setInterval(async () => {
     } else if (!val && autoModeOn) {
       autoModeOn = false;
       clearAllTimers();
-      autoPhase = 'idle';
       await setState('autoMode/phase', 'idle');
       console.log('⏹ Auto Mode OFF');
     }
-  } catch(e) {
-    console.error('❌ autoMode poll error:', e.message);
-  }
+  } catch(e) { console.error('❌ autoMode poll error:', e.message); }
 }, 3000);
 
 async function startAutoCountdown() {
@@ -770,7 +760,6 @@ async function startAutoCountdown() {
   }, 1000);
 }
 
-// ══ FIX 1: startAutoGame — bots አስቀድሞ ይጨምራል፣ ከዚያ cards ያነባል ══
 async function startAutoGame() {
   if (!autoModeOn) return;
   try {
@@ -784,32 +773,22 @@ async function startAutoGame() {
     await setState('autoMode/phase', 'playing');
     console.log('🎮 Game Started!');
 
-    // ✅ FIX: confirmedNumbers reset አታድርግ — cards countdown ወቅት ስለሚያዙ
-    // game/confirmedNumbers ን አትጥፋ! bots ለማከል ትንሽ ጠብቅ ከዚያ ጀምር
     const callSpeed = (await getState('autoMode/callSpeed')) || 6000;
-
-    // Bots ካሉ ያስቀምጣቸዋል — ከዚያ 2 ሰኮንድ ቆይቶ ይጀምራል
     await addBotsIfNeeded();
 
-    // ✅ 2 ሰኮንድ ቆይቶ cards ካረጋገጠ በኋላ ያነሳል
-    setTimeout(() => {
-      autoCallNumber(callSpeed);
-    }, 2000);
-
+    setTimeout(() => { autoCallNumber(callSpeed); }, 2000);
   } catch(e) {
     console.error('❌ startAutoGame error:', e.message);
     setTimeout(() => { if (autoModeOn) startAutoCountdown(); }, 10000);
   }
 }
 
-// ✅ NEW: Bots ማከያ function
 async function addBotsIfNeeded() {
   try {
     const enabled = await getState('smartBot/enabled');
     if (!enabled) return;
 
-    const smartBotState = await getState('smartBot');
-    const minCards = smartBotState?.minCards || 5;
+    const minCards = (await getState('smartBot/minCards')) || 5;
 
     const allCards = (await getState('game/confirmedNumbers')) || {};
     const realPlayerCount = Object.keys(allCards).length;
@@ -832,25 +811,26 @@ async function addBotsIfNeeded() {
         await pool.query('UPDATE users SET balance = balance - $1 WHERE uid=$2', [bet, botId]);
       }
     }
+
     await setState('game/confirmedNumbers', allCards);
     const total = Object.keys(allCards).length;
-    await setState('game/prize', Math.floor(bet * total * (pct / 100)));
-    await setState('game/total', bet * total);
+    const newTotal = bet * total;
+    const newPrize = Math.floor(newTotal * (pct / 100));
+    await setState('game/prize', newPrize);
+    await setState('game/total', newTotal);
+    // ✅ bot bet analytics ውስጥ ይቆጠራል (reference ብቻ — profit ሒሳብ አይጨምርም)
     await updateAnalytics('botBet', bet * botsNeeded);
-    console.log(`🤖 Added ${botsNeeded} bots. Total cards: ${total}, botBet: +${bet * botsNeeded}`);
-  } catch(e) {
-    console.error('❌ addBotsIfNeeded error:', e.message);
-  }
+    console.log(`🤖 Added ${botsNeeded} bots. Total cards: ${total}, prize: ${newPrize}`);
+  } catch(e) { console.error('❌ addBotsIfNeeded error:', e.message); }
 }
+
 async function autoCallNumber(speed) {
   if (!autoModeOn) return;
   clearInterval(callTimer);
 
-  // ✅ FIX: Cards ከDB ዘግቶ ያነባል
   const allCards = (await getState('game/confirmedNumbers')) || {};
   console.log(`📋 Cards at game start: ${Object.keys(allCards).length}`);
 
-  // ✅ FIX: Cards ከሌሉ ቢያንስ 1 ሰኮንድ ጠብቆ እንደገና ይሞክራል
   if (Object.keys(allCards).length === 0) {
     console.log('⚠️ No cards found! Skipping to next round...');
     await scheduleNextRound();
@@ -874,34 +854,39 @@ async function autoCallNumber(speed) {
 
   console.log(`🎮 Real cards: ${realCards.length}, Bot cards: ${botCards.length}`);
 
+  // ══ ✅ FIXED: realBetsTotal — real players ብቻ ══
+  const bet = (await getState('game/bet')) || 0;
+  const gamePct = (await getState('game/percent')) || 80;
+  const realBetsTotal = bet * realCards.length;  // ✅ real players ብቻ
+
+  // prize = ሁሉ cards (real + bot) × bet × pct — display ለ players
+  const totalCards = Object.keys(allCards).length;
+  const prize = Math.floor(bet * totalCards * (gamePct / 100));
+
+  await setState('game/prize', prize);
+
   const botWinPercent = (await getState('autoMode/botWinPercent')) ?? 50;
   const roll = Math.floor(Math.random() * 100) + 1;
   let targetCard = null;
   if (roll <= botWinPercent) {
     targetCard = botCards.length > 0
       ? botCards[Math.floor(Math.random() * botCards.length)]
-      : realCards.length > 0
-        ? realCards[Math.floor(Math.random() * realCards.length)] : null;
+      : realCards.length > 0 ? realCards[Math.floor(Math.random() * realCards.length)] : null;
   } else {
     targetCard = realCards.length > 0
       ? realCards[Math.floor(Math.random() * realCards.length)]
-      : botCards.length > 0
-        ? botCards[Math.floor(Math.random() * botCards.length)] : null;
+      : botCards.length > 0 ? botCards[Math.floor(Math.random() * botCards.length)] : null;
   }
 
   if (!targetCard) {
-    console.log('⚠️ No target card after retry — scheduling next round');
+    console.log('⚠️ No target card — scheduling next round');
     await scheduleNextRound();
     return;
   }
 
   const neededNums = generateBoard(Number(targetCard.cardId)).filter(n => n !== 'FREE');
   const allBoards = {};
-  for (let cardId in cardInfoMap)
-    allBoards[cardId] = generateBoard(Number(cardId));
-
-  const gameTotal = (await getState('game/total')) || 0;
-  const gamePct = (await getState('game/percent')) || 80;
+  for (let cardId in cardInfoMap) allBoards[cardId] = generateBoard(Number(cardId));
 
   callTimer = setInterval(async () => {
     try {
@@ -910,7 +895,8 @@ async function autoCallNumber(speed) {
       const pend = await getState('game/pendingWinner');
       if (pend && !pend.announced) {
         clearInterval(callTimer);
-        startAutoAnnounce();
+        // ✅ realBetsTotal pass ይደረጋል announceWinner ዉስጥ ለ profit ሒሳብ
+        startAutoAnnounce(realBetsTotal);
         return;
       }
 
@@ -922,10 +908,13 @@ async function autoCallNumber(speed) {
         for (let cardId in allCards) {
           const uid = allCards[cardId];
           if (allUsers[uid]?.is_bot) continue;
-          const bet = (await getState('game/bet')) || 0;
           await pool.query('UPDATE users SET balance = balance + $1 WHERE uid=$2', [bet, uid]);
-          await pool.query('INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
-            [uid, `⚠️ Game ሳይጠናቀቅ ተዘጋ — ${bet} ብር ተመለሰ!`, Date.now()]);
+          const r = await pool.query('SELECT balance FROM users WHERE uid=$1', [uid]);
+          broadcast({ type: 'balance', uid, balance: r.rows[0]?.balance || 0 });
+          await pool.query(
+            'INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
+            [uid, `⚠️ Game ሳይጠናቀቅ ተዘጋ — ${bet} ብር ተመለሰ!`, Date.now()]
+          );
         }
         await setState('game/announcement', { type: 'no_winner', message: 'ምንም አሸናፊ አልተገኘም', time: Date.now() });
         await scheduleNextRound();
@@ -952,9 +941,6 @@ async function autoCallNumber(speed) {
       await setState('game/calledNumbers', called);
       console.log(`📢 ${getLetter(n)}${n}`);
 
-      const prize = Math.floor(gameTotal * (gamePct / 100));
-      await setState('game/prize', prize);
-
       const winners = [];
       for (let cardId in allBoards)
         if (checkWin(allBoards[cardId], calledNumbers))
@@ -964,22 +950,19 @@ async function autoCallNumber(speed) {
         clearInterval(callTimer);
         console.log(`🏆 Winner found after ${calledNumbers.length} calls`);
         await setState('game/pendingWinner', { winners, prize, announced: false, time: Date.now() });
-        startAutoAnnounce();
+        // ✅ realBetsTotal pass ይደረጋል
+        startAutoAnnounce(realBetsTotal);
       }
-    } catch(e) {
-      console.error('❌ callNumber error:', e.message);
-    }
+    } catch(e) { console.error('❌ callNumber error:', e.message); }
   }, speed);
 }
 
-// ✅ FIX 2: Winner announce — 5 ሰኮንድ ቆይቶ ከዚያ announceWinner ይጠራል
-async function startAutoAnnounce() {
+// ✅ realBetsTotal parameter ተጨምሯል
+async function startAutoAnnounce(realBetsTotal) {
   if (!autoModeOn) return;
   clearAllTimers();
   await setState('autoMode/phase', 'announcing');
   console.log('🎉 Winner found! Announcing in 5 seconds...');
-
-  // ✅ 5 ሰኮንድ countdown ከዚያ announce
   let count = 5;
   announceTimer = setInterval(async () => {
     count--;
@@ -987,25 +970,52 @@ async function startAutoAnnounce() {
     if (count <= 0) {
       clearInterval(announceTimer);
       announceTimer = null;
-      await announceWinner();
+      await announceWinner(realBetsTotal);
       await scheduleNextRound();
     }
   }, 1000);
 }
 
-async function announceWinner() {
+// ══ ✅ FIXED announceWinner — ትክክለኛ profit ሒሳብ ══
+async function announceWinner(realBetsTotal) {
   try {
     const data = await getState('game/pendingWinner');
     if (!data) return;
     const { winners, prize } = data;
     const share = Math.floor(prize / winners.length);
-    let botWinShare = 0;
+
+    // ══════════════════════════════════════════════
+    // ✅ ትክክለኛ PROFIT LOGIC:
+    //
+    // realBetsTotal = real players ብቻ ያስገቡት ብር
+    //                 (bot bet ቤቱ ነው — ወጪ አይደለም)
+    //
+    // Bot ካሸነፈ:
+    //   profit = realBetsTotal - 0 = +realBetsTotal
+    //   (prize ወደ player አልሄደም)
+    //
+    // Real Player ካሸነፈ:
+    //   profit = realBetsTotal - prize
+    //   (ሊሆን ይችላል negative — ቤቱ ኪሳ)
+    // ══════════════════════════════════════════════
+
+    let realWinShare = 0;
+    let botWon = false;
 
     for (let w of winners) {
-      if (w.isBot) { botWinShare += share; continue; }
-      await pool.query('UPDATE users SET balance = balance + $1 WHERE uid=$2', [share, w.user]);
-      await pool.query('INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
-        [w.user, `🎉 አሸነፍክ! ${share} ብር balance ላይ ታከለ! Card #${w.cardId}`, Date.now()]);
+      if (w.isBot) {
+        botWon = true;
+        // prize ወደ bot አይሄድም — ቤቱ ያቆያል
+      } else {
+        realWinShare += share;
+        await pool.query('UPDATE users SET balance = balance + $1 WHERE uid=$2', [share, w.user]);
+        const r = await pool.query('SELECT balance FROM users WHERE uid=$1', [w.user]);
+        broadcast({ type: 'balance', uid: w.user, balance: r.rows[0]?.balance || 0 });
+        await pool.query(
+          'INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
+          [w.user, `🎉 አሸነፍክ! ${share} ብር balance ላይ ታከለ! Card #${w.cardId}`, Date.now()]
+        );
+      }
     }
 
     const winnersObj = {};
@@ -1013,45 +1023,56 @@ async function announceWinner() {
     await setState('game/winners', winnersObj);
 
     for (const w of winners) {
-      await pool.query('INSERT INTO all_winners(uid,display_name,card_id,prize,is_bot,time) VALUES($1,$2,$3,$4,$5,$6)',
-        [w.user, w.displayName, w.cardId, share, w.isBot||false, Date.now()]);
+      await pool.query(
+        'INSERT INTO all_winners(uid,display_name,card_id,prize,is_bot,time) VALUES($1,$2,$3,$4,$5,$6)',
+        [w.user, w.displayName, w.cardId, share, w.isBot || false, Date.now()]
+      );
     }
 
-    broadcast({ type:'winner', winners, prize, share, calledNumbers: calledNumbers, time: Date.now() });
-    await setState('game/announcement', { type:'winner', winners, prize, share, time:Date.now(), calledNumbers });
+    broadcast({ type: 'winner', winners, prize, share, calledNumbers, time: Date.now() });
+    await setState('game/announcement', { type: 'winner', winners, prize, share, time: Date.now(), calledNumbers });
     await setState('game/paid', true);
-    await setState('game/pendingWinner', { ...data, announced:true });
+    await setState('game/pendingWinner', { ...data, announced: true });
 
     setTimeout(async () => {
-      await setState('game/status', { started:false, waitingRestart:true });
+      await setState('game/status', { started: false, waitingRestart: true });
     }, 6000);
 
-    const allCards = (await getState('game/confirmedNumbers')) || {};
-    const total = (await getState('game/total')) || 0;
+    // ══ ✅ FIXED ANALYTICS ══
+    //
+    // totalPaidOut = real players ብቻ የተከፈለ
+    await updateAnalytics('totalPaidOut', realWinShare);
 
-    // Analytics
-    await updateAnalytics('totalCollected', total);
-    await updateAnalytics('totalPaidOut', prize);
-    if (botWinShare > 0) {
-      await updateAnalytics('totalProfit', botWinShare);
-      await updateAnalytics('botWinProfit', botWinShare);
-    }
+    // ✅ roundProfit = realBetsTotal - realWinShare
+    //    Bot ካሸነፈ:    realBetsTotal - 0     = +ብር ✅
+    //    Player ካሸነፈ: realBetsTotal - prize = ±ብር ✅
+    const roundProfit = realBetsTotal - realWinShare;
+    await updateAnalytics('totalProfit', roundProfit);
 
-    // History
+    // Daily history
     const todayStr = new Date().toISOString().split('T')[0];
     const history = (await getState('analytics/history')) || [];
     const todayIdx = history.findIndex(h => h.date === todayStr);
     if (todayIdx >= 0) {
-      history[todayIdx].profit += botWinShare;
+      history[todayIdx].profit = (history[todayIdx].profit || 0) + roundProfit;
       history[todayIdx].rounds = (history[todayIdx].rounds || 0) + 1;
+      if (botWon) history[todayIdx].botWins = (history[todayIdx].botWins || 0) + 1;
+      else history[todayIdx].playerWins = (history[todayIdx].playerWins || 0) + 1;
     } else {
-      history.push({ date: todayStr, profit: botWinShare, rounds: 1 });
+      history.push({
+        date: todayStr,
+        profit: roundProfit,
+        rounds: 1,
+        botWins: botWon ? 1 : 0,
+        playerWins: botWon ? 0 : 1
+      });
     }
     await setState('analytics/history', history.slice(-30));
 
-    console.log(`✅ Paid! ${share} ብር to ${winners.length} winner(s)`);
-  } catch (e) { console.error('❌ announceWinner error:', e.message); }
+    console.log(`✅ Round done! realBets:${realBetsTotal} paidOut:${realWinShare} profit:${roundProfit} botWon:${botWon}`);
+  } catch(e) { console.error('❌ announceWinner error:', e.message); }
 }
+
 // ══ PROMOTION BROADCAST ══
 const BOT_PY_URL = 'https://telegram-bingo-bot-production.up.railway.app/broadcast';
 
@@ -1061,11 +1082,7 @@ async function broadcastPromotion(promoData) {
 
     if (targetType === 'group' && groupId) {
       const BOT_TOKEN = process.env.BOT_TOKEN || '';
-      const bodyData = JSON.stringify({
-        chat_id: groupId,
-        text: text || '',
-        parse_mode: 'HTML'
-      });
+      const bodyData = JSON.stringify({ chat_id: groupId, text: text || '', parse_mode: 'HTML' });
       await new Promise((resolve) => {
         const options = {
           hostname: 'api.telegram.org',
@@ -1076,17 +1093,13 @@ async function broadcastPromotion(promoData) {
         const req = require('https').request(options, (res) => {
           let d = '';
           res.on('data', chunk => d += chunk);
-          res.on('end', () => { console.log('Group promo:', d); resolve(); });
+          res.on('end', () => { console.log('Group promo:', d.slice(0,80)); resolve(); });
         });
         req.on('error', (e) => { console.error('Group promo error:', e.message); resolve(); });
-        req.write(bodyData);
-        req.end();
+        req.write(bodyData); req.end();
       });
-      console.log(`✅ Promotion sent to group: ${groupId}`);
-
     } else {
       const url = new URL(BOT_PY_URL);
-
       if (photoBuffer) {
         const boundary = '----FormBoundary' + Date.now();
         const body = Buffer.concat([
@@ -1096,25 +1109,11 @@ async function broadcastPromotion(promoData) {
           Buffer.from(`\r\n--${boundary}--\r\n`)
         ]);
         await new Promise((resolve) => {
-          const options = {
-            hostname: url.hostname,
-            path: url.pathname,
-            method: 'POST',
-            headers: {
-              'Content-Type': `multipart/form-data; boundary=${boundary}`,
-              'Content-Length': body.length
-            }
-          };
-          const req = require('https').request(options, (r) => {
-            let d = '';
-            r.on('data', chunk => d += chunk);
-            r.on('end', () => { console.log('✅ Buffer broadcast:', d); resolve(); });
-          });
-          req.on('error', (e) => { console.error('❌ error:', e.message); resolve(); });
-          req.write(body);
-          req.end();
+          const options = { hostname: url.hostname, path: url.pathname, method: 'POST', headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length } };
+          const req = require('https').request(options, (r) => { let d=''; r.on('data',c=>d+=c); r.on('end',()=>{console.log('✅ Buffer broadcast:',d.slice(0,80));resolve();}); });
+          req.on('error', (e) => { console.error('❌',e.message); resolve(); });
+          req.write(body); req.end();
         });
-
       } else if (photoUrl) {
         const boundary = '----FormBoundary' + Date.now();
         const body = Buffer.concat([
@@ -1123,72 +1122,35 @@ async function broadcastPromotion(promoData) {
           Buffer.from(`--${boundary}--\r\n`)
         ]);
         await new Promise((resolve) => {
-          const options = {
-            hostname: url.hostname,
-            path: url.pathname,
-            method: 'POST',
-            headers: {
-              'Content-Type': `multipart/form-data; boundary=${boundary}`,
-              'Content-Length': body.length
-            }
-          };
-          const req = require('https').request(options, (r) => {
-            let d = '';
-            r.on('data', chunk => d += chunk);
-            r.on('end', () => { console.log('✅ URL broadcast:', d); resolve(); });
-          });
-          req.on('error', (e) => { console.error('❌ error:', e.message); resolve(); });
-          req.write(body);
-          req.end();
+          const options = { hostname: url.hostname, path: url.pathname, method: 'POST', headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length } };
+          const req = require('https').request(options, (r) => { let d=''; r.on('data',c=>d+=c); r.on('end',()=>{console.log('✅ URL broadcast:',d.slice(0,80));resolve();}); });
+          req.on('error', (e) => { console.error('❌',e.message); resolve(); });
+          req.write(body); req.end();
         });
-
       } else {
         const postData = JSON.stringify({ text: text || '' });
         await new Promise((resolve) => {
-          const options = {
-            hostname: url.hostname,
-            path: url.pathname,
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Content-Length': Buffer.byteLength(postData)
-            }
-          };
-          const req = require('https').request(options, (r) => {
-            let d = '';
-            r.on('data', chunk => d += chunk);
-            r.on('end', () => {
-              try {
-                const result = JSON.parse(d);
-                console.log('✅ Text broadcast:', result.msg);
-              } catch(e) {
-                console.log('Broadcast response:', d);
-              }
-              resolve();
-            });
-          });
-          req.on('error', (e) => { console.error('❌ error:', e.message); resolve(); });
-          req.write(postData);
-          req.end();
+          const options = { hostname: url.hostname, path: url.pathname, method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) } };
+          const req = require('https').request(options, (r) => { let d=''; r.on('data',c=>d+=c); r.on('end',()=>{console.log('✅ Text broadcast:',d.slice(0,80));resolve();}); });
+          req.on('error', (e) => { console.error('❌',e.message); resolve(); });
+          req.write(postData); req.end();
         });
       }
     }
-  } catch(e) {
-    console.error('❌ broadcastPromotion error:', e.message);
-  }
+  } catch(e) { console.error('❌ broadcastPromotion error:', e.message); }
 }
 
 async function scheduleNextRound() {
   if (!autoModeOn) return;
   try {
     const todayStr = new Date().toISOString().split('T')[0];
-const lastReset = await getState('analytics/lastResetDate');
-if (lastReset !== todayStr) {
-  await setState('analytics/lastResetDate', todayStr);
-  roundNumber = 1;
-  await setState('autoMode/round', roundNumber);
-  console.log('🔄 Daily Reset:', todayStr);
-}
+    const lastReset = await getState('analytics/lastResetDate');
+    if (lastReset !== todayStr) {
+      await setState('analytics/lastResetDate', todayStr);
+      roundNumber = 1;
+      await setState('autoMode/round', roundNumber);
+      console.log('🔄 Daily Reset:', todayStr);
+    }
 
     roundNumber++;
     await setState('autoMode/round', roundNumber);
@@ -1232,30 +1194,18 @@ setTimeout(async () => {
         await startAutoCountdown();
       }
     }
-  } catch(e) {
-    console.error('❌ Restore error:', e.message);
-  }
+  } catch(e) { console.error('❌ Restore error:', e.message); }
 }, 3000);
-// ── AUTO CLEANUP ──
+
 setInterval(async () => {
   try {
-    await pool.query(
-      'DELETE FROM notifications WHERE time < $1',
-      [Date.now() - (7 * 24 * 60 * 60 * 1000)]
-    );
-    await pool.query(
-      `DELETE FROM all_winners WHERE id NOT IN 
-      (SELECT id FROM all_winners ORDER BY time DESC LIMIT 500)`
-    );
-    await pool.query(
-  'DELETE FROM promotions WHERE active=false AND created_at < $1',
-  [Date.now() - (30 * 24 * 60 * 60 * 1000)]
-);
+    await pool.query('DELETE FROM notifications WHERE time < $1', [Date.now() - (7 * 24 * 60 * 60 * 1000)]);
+    await pool.query(`DELETE FROM all_winners WHERE id NOT IN (SELECT id FROM all_winners ORDER BY time DESC LIMIT 500)`);
+    await pool.query('DELETE FROM promotions WHERE active=false AND created_at < $1', [Date.now() - (30 * 24 * 60 * 60 * 1000)]);
     console.log('✅ Auto cleanup done');
-  } catch(e) {
-    console.error('Cleanup error:', e.message);
-  }
+  } catch(e) { console.error('Cleanup error:', e.message); }
 }, 24 * 60 * 60 * 1000);
+
 // ══ ADMIN CONTROL ENDPOINTS ══
 app.post('/admin/auto-start', async (req, res) => {
   try {
@@ -1281,15 +1231,17 @@ app.post('/admin/auto-stop', async (req, res) => {
 
 app.post('/admin/set-settings', async (req, res) => {
   try {
-    const { bet, percent, cdMinutes, callSpeed, botWinPercent } = req.body;
+    const { bet, percent, cdMinutes, callSpeed, botWinPercent, botMinCards } = req.body;
     if (bet !== undefined) await setState('game/bet', Number(bet));
     if (percent !== undefined) await setState('game/percent', Number(percent));
     if (cdMinutes !== undefined) await setState('autoMode/cdMinutes', Number(cdMinutes));
     if (callSpeed !== undefined) await setState('autoMode/callSpeed', Number(callSpeed));
     if (botWinPercent !== undefined) await setState('autoMode/botWinPercent', Number(botWinPercent));
+    if (botMinCards !== undefined) await setState('smartBot/minCards', Number(botMinCards));
     res.json({ ok: true, msg: '✅ Settings saved!' });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
+
 app.post('/set-state', async (req, res) => {
   try {
     const { key, value } = req.body;
@@ -1301,13 +1253,133 @@ app.post('/set-state', async (req, res) => {
 app.post('/start-auto', async (req, res) => {
   try {
     const { cdMinutes, callSpeed } = req.body;
-    if(cdMinutes) await setState('autoMode/cdMinutes', Number(cdMinutes));
-    if(callSpeed) await setState('autoMode/callSpeed', Number(callSpeed));
+    if (cdMinutes) await setState('autoMode/cdMinutes', Number(cdMinutes));
+    if (callSpeed) await setState('autoMode/callSpeed', Number(callSpeed));
     await setState('autoMode/on', true);
     autoModeOn = true;
     autoCdMinutes = cdMinutes || autoCdMinutes;
     startAutoCountdown();
     res.json({ ok: true, msg: '✅ Auto started!' });
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
+});
+
+// ══ AGENT ENDPOINTS ══
+app.post('/withdrawal-accept', async (req, res) => {
+  try {
+    const { key, agentId } = req.body;
+    if (!key || !agentId) return res.json({ ok: false, msg: 'Missing data' });
+    const allWd = JSON.parse(
+      (await pool.query("SELECT value FROM game_state WHERE key='bot/withdrawals'")).rows[0]?.value || '{}'
+    );
+    if (!allWd[key]) return res.json({ ok: false, msg: 'Not found' });
+    const now = Date.now();
+    const LOCK_MS = 3 * 60 * 1000;
+    if (allWd[key].status === 'accepted' && allWd[key].acceptedBy !== agentId && now - (allWd[key].acceptedAt || 0) < LOCK_MS) {
+      return res.json({ ok: false, msg: '⚠️ ሌላ Agent ወስዷል!' });
+    }
+    const myActive = Object.entries(allWd).find(
+      ([k, v]) => v.status === 'accepted' && v.acceptedBy === agentId && k !== key
+    );
+    if (myActive) return res.json({ ok: false, msg: '⚠️ አሁን ያለህን Request አጠናቅ!' });
+    allWd[key].status = 'accepted';
+    allWd[key].acceptedBy = agentId;
+    allWd[key].acceptedAt = now;
+    await setState('bot/withdrawals', allWd);
+    res.json({ ok: true, msg: '✅ Request ተቀበልክ! 3 ደቂቃ አለህ.' });
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
+});
+
+app.post('/withdrawal-release', async (req, res) => {
+  try {
+    const { key, agentId } = req.body;
+    if (!key || !agentId) return res.json({ ok: false, msg: 'Missing data' });
+    const allWd = JSON.parse(
+      (await pool.query("SELECT value FROM game_state WHERE key='bot/withdrawals'")).rows[0]?.value || '{}'
+    );
+    if (!allWd[key]) return res.json({ ok: false, msg: 'Not found' });
+    if (allWd[key].acceptedBy !== agentId) return res.json({ ok: false, msg: '❌ ይህ request ያንተ አይደለም!' });
+    allWd[key].status = 'pending';
+    allWd[key].acceptedBy = null;
+    allWd[key].acceptedAt = null;
+    await setState('bot/withdrawals', allWd);
+    res.json({ ok: true, msg: '↩ Request ለሌላ Agent ተለቀቀ!' });
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
+});
+
+app.post(
+  '/withdrawal-paid',
+  multer({ storage: multer.memoryStorage() }).single('photo'),
+  async (req, res) => {
+    try {
+      const { key, agentId } = req.body;
+      const file = req.file;
+      if (!key || !agentId) return res.json({ ok: false, msg: 'Missing data' });
+      const allWd = JSON.parse(
+        (await pool.query("SELECT value FROM game_state WHERE key='bot/withdrawals'")).rows[0]?.value || '{}'
+      );
+      const wd = allWd[key];
+      if (!wd) return res.json({ ok: false, msg: 'Not found' });
+      if (wd.acceptedBy !== agentId) return res.json({ ok: false, msg: '❌ ይህ request ያንተ አይደለም!' });
+
+      const uid = String(wd.user_id);
+      const amount = wd.amount || 0;
+      const method = wd.method || 'ባንክ';
+      const account = wd.account || '—';
+      const BOT_TOKEN = process.env.BOT_TOKEN || '';
+
+      if (file && BOT_TOKEN) {
+        try {
+          const boundary = '----FormBoundary' + Date.now();
+          const caption = `✅ ${amount} ብር በ ${method} ተላከ!\n📋 Account: ${account}`;
+          const body = Buffer.concat([
+            Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${uid}\r\n`),
+            Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption}\r\n`),
+            Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="screenshot.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
+            file.buffer,
+            Buffer.from(`\r\n--${boundary}--\r\n`),
+          ]);
+          await new Promise((resolve) => {
+            const opts = {
+              hostname: 'api.telegram.org',
+              path: `/bot${BOT_TOKEN}/sendPhoto`,
+              method: 'POST',
+              headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length }
+            };
+            const r2 = require('https').request(opts, (r) => { let d=''; r.on('data',c=>d+=c); r.on('end',()=>{console.log('📸 TG photo:',d.slice(0,80));resolve();}); });
+            r2.on('error', () => resolve());
+            r2.write(body); r2.end();
+          });
+        } catch(e) { console.error('❌ TG photo error:', e.message); }
+      }
+
+      allWd[key].status = 'approved';
+      await setState('bot/withdrawals', allWd);
+      await updateAnalytics('totalWithdrawals', amount);
+      await pool.query(
+        'INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
+        [uid, `✅ ${amount} ብር በ ${method} ተላከ!`, Date.now()]
+      );
+      broadcast({ type: 'withdrawal_approved', key, uid, amount });
+      res.json({ ok: true });
+    } catch(e) { res.json({ ok: false, msg: e.message }); }
+  }
+);
+
+app.post('/agent-verify', async (req, res) => {
+  try {
+    const { name, idNumber, password } = req.body;
+    const agents = JSON.parse(
+      (await pool.query("SELECT value FROM game_state WHERE key='agents'")).rows[0]?.value || '{}'
+    );
+    const agent = agents[name];
+    if (!agent) return res.json({ ok: false, msg: '❌ Agent አልተመዘገበም!' });
+    if (String(agent.id_number) !== String(idNumber))
+      return res.json({ ok: false, msg: '❌ የግል ቁጥር ትክክል አይደለም!' });
+    const agentPass =
+      (await pool.query("SELECT value FROM game_state WHERE key='settings/agent_password'")).rows[0]?.value?.replace(/"/g, '') || 'agent2025';
+    if (password !== agentPass)
+      return res.json({ ok: false, msg: '❌ Password ትክክል አይደለም!' });
+    res.json({ ok: true, agentName: name });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
 
