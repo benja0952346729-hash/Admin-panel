@@ -928,11 +928,14 @@ async function autoCallNumber(speed) {
       const safeNeeded = neededRemaining.filter(n => safeRemaining.includes(n));
 
       let n;
+      const noBotBias = (await getState('autoMode/noBotBias')) ?? 0.50;
       const rand = Math.random();
-      if (safeNeeded.length > 0 && rand < 0.65)
+      if (safeNeeded.length > 0 && rand < noBotBias)
         n = safeNeeded[Math.floor(Math.random() * safeNeeded.length)];
       else if (safeRemaining.length > 0)
         n = safeRemaining[Math.floor(Math.random() * safeRemaining.length)];
+      else
+        n = remaining[Math.floor(Math.random() * remaining.length)];
       else
         n = remaining[Math.floor(Math.random() * remaining.length)];
 
