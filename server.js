@@ -936,8 +936,6 @@ async function autoCallNumber(speed) {
         n = safeRemaining[Math.floor(Math.random() * safeRemaining.length)];
       else
         n = remaining[Math.floor(Math.random() * remaining.length)];
-      else
-        n = remaining[Math.floor(Math.random() * remaining.length)];
 
       calledNumbers.push(n);
       const called = (await getState('game/calledNumbers')) || [];
@@ -1250,13 +1248,14 @@ app.post('/admin/auto-stop', async (req, res) => {
 
 app.post('/admin/set-settings', async (req, res) => {
   try {
-    const { bet, percent, cdMinutes, callSpeed, botWinPercent, botMinCards } = req.body;
+    const { bet, percent, cdMinutes, callSpeed, botWinPercent, botMinCards, noBotBias } = req.body;
     if (bet !== undefined) await setState('game/bet', Number(bet));
     if (percent !== undefined) await setState('game/percent', Number(percent));
     if (cdMinutes !== undefined) await setState('autoMode/cdMinutes', Number(cdMinutes));
     if (callSpeed !== undefined) await setState('autoMode/callSpeed', Number(callSpeed));
     if (botWinPercent !== undefined) await setState('autoMode/botWinPercent', Number(botWinPercent));
     if (botMinCards !== undefined) await setState('smartBot/minCards', Number(botMinCards));
+    if (noBotBias !== undefined) await setState('autoMode/noBotBias', Number(noBotBias));
     res.json({ ok: true, msg: '✅ Settings saved!' });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
