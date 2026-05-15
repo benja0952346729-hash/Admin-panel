@@ -165,7 +165,6 @@ app.get('/events', (req, res) => {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
-  res.uid = req.query.userId || null;
   sseClients.push(res);
   req.on('close', () => { sseClients = sseClients.filter(c => c !== res); });
 });
@@ -1027,16 +1026,7 @@ async function announceWinner(realBetsTotal, botBetsTotal) {
         );
       }
     }
-    sseClients.forEach(client => {
-  if (client.uid === String(w.user)) {
-    client.write(`data: ${JSON.stringify({
-      type: 'you_won',
-      prize: share,
-      cardId: w.cardId,
-      name: w.displayName
-    })}\n\n`);
-  }
-});
+    
     const winnersObj = {};
     winners.forEach((w, i) => { winnersObj[i] = { ...w, prize: share }; });
     await setState('game/winners', winnersObj);
