@@ -634,7 +634,7 @@ app.post('/confirm-card', async (req, res) => {
 
     const allCards = (await getState('game/confirmedNumbers')) || {};
     const myCards = Object.values(allCards).filter(v => String(v) === String(userId));
-    if (myCards.length >= 5) return res.json({ ok: false, msg: '❌ Max 5 cards!' });
+    if (myCards.length >= 10) return res.json({ ok: false, msg: '❌ ከ 10 ካርድ በላይ መያዝ አይቻልም!' });
     if (allCards[cardId]) return res.json({ ok: false, msg: '❌ Card ተይዟል!' });
 
     allCards[cardId] = userId;
