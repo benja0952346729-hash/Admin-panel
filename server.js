@@ -526,6 +526,20 @@ async function loadCloudinarySounds() {
     req.end();
   });
 }
+app.get('/withdrawal-status', async (req, res) => {
+  try {
+    const status = await getState('settings/withdrawal_enabled');
+    res.json({ enabled: status !== false });
+  } catch(e) { res.json({ enabled: true }); }
+});
+
+app.post('/withdrawal-toggle', async (req, res) => {
+  try {
+    const { enabled } = req.body;
+    await setState('settings/withdrawal_enabled', enabled);
+    res.json({ ok: true, enabled });
+  } catch(e) { res.json({ ok: false }); }
+});
 app.post('/clear-analytics', async (req, res) => {
   try {
     await pool.query('DELETE FROM analytics');
@@ -1401,14 +1415,21 @@ app.post(
       }
 
       allWd[key].status = 'approved';
-      await setState('bot/withdrawals', allWd);
-      await updateAnalytics('totalWithdrawals', amount);
-      await pool.query(
-        'INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
-        [uid, `✅ ${amount} ብር በ ${method} ተላከ!`, Date.now()]
-      );
-      broadcast({ type: 'withdrawal_approved', key, uid, amount });
-      res.json({ ok: true });
+await setState('bot/withdrawals', allWd);
+await updateAnalytics('totalWithdrawals', amount);
+
+// ✅ Balance ወደ 0 ይዝጋ (pending withdrawal)
+await pool.query(
+  "UPDATE game_state SET value='0' WHERE key=$1",
+  [`users/${uid}/pending_withdrawal`]
+);
+
+await pool.query(
+  'INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
+  [uid, `✅ ${amount} ብር በ ${method} ተላከ!\n📋 Account: ${account}`, Date.now()]
+);
+broadcast({ type: 'withdrawal_approved', key, uid, amount });
+res.json({ ok: true });
     } catch(e) { res.json({ ok: false, msg: e.message }); }
   }
 );
