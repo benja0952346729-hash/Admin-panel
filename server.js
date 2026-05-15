@@ -427,7 +427,22 @@ app.post('/change-agent-pass', async (req, res) => {
 
 app.post('/remove-bots', async (req, res) => {
   try {
+    // DB ከ bots አጸዳ
     await pool.query('DELETE FROM users WHERE is_bot = true');
+    
+    // game/confirmedNumbers ከ bot cards አጸዳ
+    const allCards = (await getState('game/confirmedNumbers')) || {};
+    const botUsers = await pool.query('SELECT uid FROM users WHERE is_bot = true');
+    const botIds = new Set(botUsers.rows.map(r => r.uid));
+    
+    const cleanCards = {};
+    for (let cardId in allCards) {
+      if (!botIds.has(String(allCards[cardId]))) {
+        cleanCards[cardId] = allCards[cardId];
+      }
+    }
+    await setState('game/confirmedNumbers', cleanCards);
+
     res.json({ ok: true });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
@@ -991,7 +1006,8 @@ async function announceWinner(realBetsTotal, botBetsTotal) {
     const data = await getState('game/pendingWinner');
     if (!data) return;
     const { winners, prize } = data;
-    const share = Math.floor(prize / winners.length);
+const share = Math.floor(prize / winners.length);
+const gamePct = (await getState('game/percent')) || 80;
 
     // ══════════════════════════════════════════════
     // ✅ ትክክለኛ PROFIT LOGIC:
