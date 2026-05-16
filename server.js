@@ -1,1709 +1,1445 @@
-const express = require('express');
-const cors = require('cors');
-const path = require('path');
-const https = require('https');
-const multer = require('multer');
-const { Pool } = require('pg');
+<!DOCTYPE html>
+<html lang="am">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bingo Pro — Admin</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Noto+Sans+Ethiopic:wght@400;600;700&display=swap');
 
-const app = express();
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
-
-// ══ ANALYTICS HELPER ══
-async function updateAnalytics(key, amount) {
-  try {
-    await pool.query(
-      'INSERT INTO analytics(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value = analytics.value + $2',
-      [key, amount]
-    );
-  } catch(e) {
-    console.error('❌ Analytics error:', key, e.message);
+  :root {
+    --bg: #0a0c10;
+    --card: #111318;
+    --card2: #161a22;
+    --border: #1e2330;
+    --gold: #f5c518;
+    --cyan: #00e5ff;
+    --green: #00e676;
+    --red: #ff1744;
+    --purple: #ce93d8;
+    --blue: #64b5f6;
+    --text: #e8eaf0;
+    --muted: #5a6070;
   }
-}
 
-pool.query(`
-  CREATE TABLE IF NOT EXISTS game_state (key TEXT PRIMARY KEY, value TEXT);
-  CREATE TABLE IF NOT EXISTS users (uid TEXT PRIMARY KEY, display TEXT, balance NUMERIC DEFAULT 0, is_bot BOOLEAN DEFAULT false);
-  CREATE TABLE IF NOT EXISTS promotions (id SERIAL PRIMARY KEY, text TEXT, photo_url TEXT, target_type TEXT, group_id TEXT, interval_ms BIGINT, next_send_at BIGINT, last_sent_at BIGINT, active BOOLEAN DEFAULT true, created_at BIGINT);
-  CREATE TABLE IF NOT EXISTS notifications (id SERIAL PRIMARY KEY, uid TEXT, message TEXT, time BIGINT, read BOOLEAN DEFAULT false);
-  CREATE TABLE IF NOT EXISTS analytics (key TEXT PRIMARY KEY, value NUMERIC DEFAULT 0);
-  CREATE TABLE IF NOT EXISTS all_winners (id SERIAL PRIMARY KEY, uid TEXT, display_name TEXT, card_id TEXT, prize NUMERIC, is_bot BOOLEAN, time BIGINT);
-`)
-.then(() => console.log('✅ DB ready!'))
-.catch(e => console.error('DB error:', e.message));
+  * { margin: 0; padding: 0; box-sizing: border-box; }
 
-async function getState(key) {
-  const r = await pool.query('SELECT value FROM game_state WHERE key=$1', [key]);
-  return r.rows.length ? JSON.parse(r.rows[0].value) : null;
-}
-
-async function setState(key, value) {
-  await pool.query(
-    'INSERT INTO game_state(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2',
-    [key, JSON.stringify(value)]
-  );
-}
-
-app.use(cors({ origin: '*', methods: ['GET', 'POST'], allowedHeaders: ['Content-Type'] }));
-app.use(express.static(__dirname));
-app.use(express.json());
-
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
-
-app.get('/health', async (req, res) => {
-  try {
-    const users = await pool.query('SELECT COUNT(*) FROM users');
-    const notifications = await pool.query('SELECT COUNT(*) FROM notifications');
-    const winners = await pool.query('SELECT COUNT(*) FROM all_winners');
-    const dbSize = await pool.query("SELECT pg_size_pretty(pg_database_size(current_database())) as size");
-    res.json({
-      ok: true,
-      users: Number(users.rows[0].count),
-      notifications: Number(notifications.rows[0].count),
-      winners: Number(winners.rows[0].count),
-      db_size: dbSize.rows[0].size
-    });
-  } catch(e) {
-    res.json({ ok: true });
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Rajdhani', 'Noto Sans Ethiopic', sans-serif;
+    min-height: 100vh;
+    overflow-x: hidden;
   }
-});
 
-app.get('/user-state', async (req, res) => {
-  const { userId, firstName } = req.query;
-  const displayName = firstName ? decodeURIComponent(firstName) : userId;
-  if (!userId) return res.json({ balance: 0, isNew: false });
-  try {
-    const existing = await pool.query('SELECT uid FROM users WHERE uid=$1', [userId]);
-    const isNew = existing.rows.length === 0;
-    if (isNew) {
-      await pool.query(
-        'INSERT INTO users(uid,display,balance,is_bot) VALUES($1,$2,20,false)',
-        [userId, displayName]
-      );
-    } else {
-      await pool.query('UPDATE users SET display=$2 WHERE uid=$1', [userId, displayName]);
-    }
-    const u = await pool.query('SELECT balance FROM users WHERE uid=$1', [userId]);
-    res.json({ balance: u.rows[0]?.balance || 0, isNew });
-  } catch(e) { res.json({ balance: 0, isNew: false }); }
-});
-
-app.post('/set-not-new', async (req, res) => { res.json({ ok: true }); });
-
-app.get('/all-winners', async (req, res) => {
-  try {
-    const r = await pool.query(
-      'SELECT uid as user, display_name as "displayName", card_id as "cardId", prize, time FROM all_winners ORDER BY time DESC LIMIT 100'
-    );
-    const round = (await getState('autoMode/round')) || 1;
-    res.json({ winners: r.rows, round });
-  } catch(e) { res.json({ winners: [], round: 1 }); }
-});
-
-app.post('/submit-payment',
-  multer({ storage: multer.memoryStorage() }).single('photo'),
-  async (req, res) => {
-    const { userId, amount } = req.body;
-    const file = req.file;
-    if (!file || !userId || !amount)
-      return res.json({ ok: false, msg: '❌ Data missing' });
-    try {
-      const auth = Buffer.from(`${CLOUDINARY_API_KEY}:${CLOUDINARY_API_SECRET}`).toString('base64');
-      const boundary = '----FormBoundary' + Date.now();
-      const body = Buffer.concat([
-        Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="pay.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
-        file.buffer,
-        Buffer.from(`\r\n--${boundary}--\r\n`)
-      ]);
-      const photoUrl = await new Promise((resolve) => {
-        const opts = {
-          hostname: 'api.cloudinary.com',
-          path: `/v1_1/${CLOUDINARY_CLOUD}/image/upload`,
-          method: 'POST',
-          headers: {
-            'Authorization': `Basic ${auth}`,
-            'Content-Type': `multipart/form-data; boundary=${boundary}`,
-            'Content-Length': body.length
-          }
-        };
-        const req2 = require('https').request(opts, r => {
-          let d = '';
-          r.on('data', c => d += c);
-          r.on('end', () => { try { resolve(JSON.parse(d).secure_url || ''); } catch { resolve(''); } });
-        });
-        req2.on('error', () => resolve(''));
-        req2.write(body); req2.end();
-      });
-
-      const key = `pay_${userId}_${Date.now()}`;
-      const existing = (await getState('bot/payments')) || {};
-      existing[key] = {
-        user_id: userId, amount: Number(amount),
-        photo_url: photoUrl, status: 'pending',
-        time: new Date().toISOString()
-      };
-      await setState('bot/payments', existing);
-      res.json({ ok: true });
-    } catch(e) { res.json({ ok: false, msg: e.message }); }
+  .header {
+    background: #0d0f14;
+    border-bottom: 1px solid var(--border);
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
   }
-);
+  .logo { font-size: 28px; font-weight: 700; color: var(--gold); letter-spacing: 4px; text-shadow: 0 0 20px rgba(245,197,24,0.4); }
+  .header-badges { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  .badge { display: flex; align-items: center; gap: 5px; background: var(--card2); border: 1px solid var(--border); border-radius: 20px; padding: 5px 12px; font-size: 14px; font-weight: 600; }
+  .badge.round { border-color: #9c27b0; color: var(--gold); }
+  .badge.players { border-color: #1565c0; color: var(--blue); }
+  .badge.cards { border-color: #b71c1c; color: #ef9a9a; }
+  .badge.prize { border-color: #1b5e20; color: var(--green); }
 
-// ══ SSE ══
-let sseClients = [];
-app.get('/events', (req, res) => {
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.flushHeaders();
-  sseClients.push(res);
-  req.on('close', () => { sseClients = sseClients.filter(c => c !== res); });
-});
+  .nav-tabs { display: flex; gap: 4px; padding: 10px 16px; background: #0d0f14; border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: none; }
+  .nav-tabs::-webkit-scrollbar { display: none; }
+  .nav-tab { flex-shrink: 0; padding: 8px 16px; border-radius: 10px; border: 1px solid var(--border); background: var(--card2); color: var(--muted); font-family: 'Rajdhani', sans-serif; font-size: 13px; font-weight: 700; letter-spacing: 1px; cursor: pointer; transition: all 0.2s; white-space: nowrap; }
+  .nav-tab:hover { border-color: var(--gold); color: var(--text); }
+  .nav-tab.active { background: var(--gold); border-color: var(--gold); color: #000; }
 
-function broadcast(data) {
-  sseClients.forEach(client => { client.write(`data: ${JSON.stringify(data)}\n\n`); });
-}
+  .page { display: none; }
+  .page.active { display: block; }
+  .main { padding: 16px; max-width: 600px; margin: 0 auto; }
 
-// ══ TTS PROXY ══
-const SOUNDS_SERVER = 'https://game-production-7f86.up.railway.app';
+  .auto-card { border: 2px solid var(--gold); border-radius: 16px; background: var(--card); overflow: hidden; margin-bottom: 14px; box-shadow: 0 0 30px rgba(245,197,24,0.05); }
+  .auto-header { padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; }
+  .auto-title-row { display: flex; align-items: center; gap: 10px; }
+  .status-dot { width: 12px; height: 12px; border-radius: 50%; background: var(--green); box-shadow: 0 0 10px var(--green); animation: pulse 1.5s infinite; flex-shrink: 0; }
+  .status-dot.off { background: var(--muted); box-shadow: none; animation: none; }
+  @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.6; transform: scale(0.85); } }
+  .auto-title { font-size: 16px; font-weight: 700; letter-spacing: 2px; color: var(--cyan); text-transform: uppercase; }
+  .collapse-btn { background: none; border: none; cursor: pointer; color: var(--cyan); font-size: 18px; transition: transform 0.3s; }
+  .collapse-btn.collapsed { transform: rotate(180deg); }
+  .divider { height: 1px; background: var(--border); margin: 0 18px; }
+  .section-label { padding: 12px 18px 8px; font-size: 11px; letter-spacing: 2px; color: var(--cyan); font-weight: 700; display: flex; align-items: center; gap: 6px; }
+  .cd-grid { padding: 0 14px 12px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .cd-btn { background: var(--card2); border: 1px solid var(--border); border-radius: 10px; color: var(--text); font-family: 'Rajdhani', sans-serif; font-size: 14px; font-weight: 700; padding: 10px 4px; cursor: pointer; transition: all 0.2s; letter-spacing: 1px; }
+  .cd-btn:hover { border-color: var(--gold); color: var(--gold); }
+  .cd-btn.active { background: var(--green); border-color: var(--green); color: #000; box-shadow: 0 0 15px rgba(0,230,118,0.3); }
+  .saved-msg { padding: 0 18px 12px; font-size: 13px; color: var(--green); display: flex; align-items: center; gap: 6px; }
+  .speed-row { padding: 0 18px 14px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .speed-label { font-size: 14px; color: var(--muted); font-weight: 600; font-family: 'Noto Sans Ethiopic', sans-serif; }
+  .speed-select, .speed-input { background: var(--card2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-family: 'Rajdhani', sans-serif; font-size: 14px; font-weight: 600; padding: 8px 12px; cursor: pointer; outline: none; transition: border-color 0.2s; min-width: 100px; }
+  .speed-select:focus, .speed-input:focus { border-color: var(--cyan); }
+  .speed-select option { background: #1a1e28; }
+  .main-btn { margin: 0 14px 14px; width: calc(100% - 28px); padding: 16px; border-radius: 12px; border: none; font-family: 'Rajdhani', sans-serif; font-size: 16px; font-weight: 700; letter-spacing: 2px; cursor: pointer; transition: all 0.25s; display: flex; align-items: center; justify-content: center; gap: 8px; text-transform: uppercase; }
+  .btn-stop { background: linear-gradient(135deg,#e53935,#b71c1c); color:#fff; box-shadow:0 4px 20px rgba(229,57,53,0.3); }
+  .btn-stop:hover { box-shadow:0 4px 30px rgba(229,57,53,0.5); transform:translateY(-1px); }
+  .btn-start { background: linear-gradient(135deg,#00c853,#1b5e20); color:#fff; box-shadow:0 4px 20px rgba(0,200,83,0.3); }
+  .btn-start:hover { box-shadow:0 4px 30px rgba(0,200,83,0.5); transform:translateY(-1px); }
+  .btn-blue { background: linear-gradient(135deg,#1565c0,#0d47a1); color:#fff; }
+  .btn-purple { background: linear-gradient(135deg,#7b1fa2,#4a148c); color:#fff; }
+  .btn-gold { background: linear-gradient(135deg,#f5c518,#e6a800); color:#000; font-weight:800; }
+  .btn-cyan { background: linear-gradient(135deg,#00acc1,#006064); color:#fff; }
+  .phase-card { margin: 0 14px 14px; background: var(--card2); border: 1px solid var(--border); border-radius: 12px; padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; }
+  .phase-lbl { font-size:11px; letter-spacing:2px; color:var(--muted); font-weight:600; margin-bottom:4px; }
+  .phase-value { font-size:16px; font-weight:700; color:var(--cyan); letter-spacing:1.5px; display:flex; align-items:center; gap:6px; }
+  .phase-sub { font-size:12px; color:var(--muted); margin-top:4px; font-family:'Noto Sans Ethiopic',sans-serif; }
+  .phase-bar { width:40px; height:3px; background:var(--gold); border-radius:2px; animation:shimmer 2s infinite; }
+  @keyframes shimmer { 0%,100%{opacity:1} 50%{opacity:0.3} }
+  .collapsible { overflow:hidden; transition:max-height 0.35s ease; }
+  .collapsible.collapsed { max-height:0 !important; }
 
-app.get('/tts/winner-announce', async (req, res) => {
-  try {
-    const response = await new Promise((resolve, reject) => {
-      https.get(`${SOUNDS_SERVER}/tts/winner-announce`, (r) => {
-        const chunks = [];
-        r.on('data', chunk => chunks.push(chunk));
-        r.on('end', () => resolve({ buffer: Buffer.concat(chunks) }));
-        r.on('error', reject);
-      }).on('error', reject);
-    });
-    res.set('Content-Type', 'audio/mpeg');
-    res.send(response.buffer);
-  } catch(e) { res.status(500).json({ error: 'TTS failed' }); }
-});
+  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 14px; }
+  .stat-box { background: var(--card2); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
+  .stat-lbl { font-size:10px; letter-spacing:2px; color:var(--muted); font-weight:700; margin-bottom:4px; text-transform:uppercase; }
+  .stat-val { font-size:20px; font-weight:700; }
+  .c-cyan{color:var(--cyan);} .c-gold{color:var(--gold);} .c-green{color:var(--green);}
+  .c-red{color:var(--red);} .c-purple{color:var(--purple);} .c-blue{color:var(--blue);}
 
-app.get('/tts/bingo', async (req, res) => {
-  try {
-    const response = await new Promise((resolve, reject) => {
-      https.get(`${SOUNDS_SERVER}/tts/bingo`, (r) => {
-        const chunks = [];
-        r.on('data', chunk => chunks.push(chunk));
-        r.on('end', () => resolve({ buffer: Buffer.concat(chunks) }));
-        r.on('error', reject);
-      }).on('error', reject);
-    });
-    res.set('Content-Type', 'audio/mpeg');
-    res.send(response.buffer);
-  } catch(e) { res.status(500).json({ error: 'TTS failed' }); }
-});
+  .list-item { background: var(--card2); border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-bottom: 10px; }
+  .list-item-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .list-item-name { font-size:15px; font-weight:700; color:var(--text); }
+  .list-item-val { font-size:16px; font-weight:700; color:var(--gold); }
+  .list-item-sub { font-size:12px; color:var(--muted); margin-bottom:10px; font-family:'Noto Sans Ethiopic',sans-serif; }
+  .row-btns { display:flex; gap:8px; }
+  .small-btn { flex:1; padding:10px 8px; border:none; border-radius:8px; color:#fff; font-family:'Rajdhani',sans-serif; font-size:13px; font-weight:700; cursor:pointer; letter-spacing:1px; transition:all 0.2s; }
+  .small-btn:hover { opacity:0.85; transform:translateY(-1px); }
+  .s-green{background:linear-gradient(135deg,#00c853,#1b5e20);}
+  .s-red{background:linear-gradient(135deg,#e53935,#b71c1c);}
+  .s-blue{background:linear-gradient(135deg,#1565c0,#0d47a1);}
+  .s-purple{background:linear-gradient(135deg,#7b1fa2,#4a148c);}
+  .s-gold{background:linear-gradient(135deg,#f5c518,#e6a800);color:#000;}
+  .s-cyan{background:linear-gradient(135deg,#00acc1,#006064);}
 
-app.get('/tts/number/:n', async (req, res) => {
-  const n = parseInt(req.params.n);
-  if (isNaN(n) || n < 1 || n > 75)
-    return res.status(400).json({ error: 'Invalid number' });
-  try {
-    const response = await new Promise((resolve, reject) => {
-      https.get(`${SOUNDS_SERVER}/tts/number/${n}`, (r) => {
-        const chunks = [];
-        r.on('data', chunk => chunks.push(chunk));
-        r.on('end', () => resolve({ buffer: Buffer.concat(chunks), type: r.headers['content-type'] }));
-        r.on('error', reject);
-      }).on('error', reject);
-    });
-    res.set('Content-Type', 'audio/mpeg');
-    res.send(response.buffer);
-  } catch(e) { res.status(500).json({ error: 'TTS failed' }); }
-});
+  .field-row { padding: 0 14px 12px; display: flex; flex-direction: column; gap: 6px; }
+  .field-lbl { font-size:12px; letter-spacing:1px; color:var(--muted); font-weight:700; }
+  .field-input { background: var(--card2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-family: 'Noto Sans Ethiopic','Rajdhani',sans-serif; font-size: 14px; font-weight: 600; padding: 10px 14px; outline: none; width: 100%; transition: border-color 0.2s; }
+  .field-input:focus { border-color: var(--cyan); }
+  .field-input::placeholder { color: var(--muted); }
+  textarea.field-input { resize: vertical; min-height: 80px; }
 
-app.get('/game-state', async (req, res) => {
-  try {
-    const rows = await pool.query('SELECT key, value FROM game_state');
-    const result = {};
-    rows.rows.forEach(r => {
-      const keys = r.key.split('/');
-      let obj = result;
-      for (let i = 0; i < keys.length - 1; i++) {
-        if (!obj[keys[i]]) obj[keys[i]] = {};
-        obj = obj[keys[i]];
-      }
-      try { obj[keys[keys.length-1]] = JSON.parse(r.value); }
-      catch { obj[keys[keys.length-1]] = r.value; }
-    });
-    const flat = result.game || {};
-    flat.autoMode = result.autoMode;
-    flat.smartBot = result.smartBot;
-    flat.settings = result.settings;
-    flat.announcement = result.game?.announcement;
-    flat.winners = result.game?.winners;
-    flat.pendingWinner = result.game?.pendingWinner;
-    flat.status = result.game?.status;
-    flat.calledNumbers = result.game?.calledNumbers;
-    flat.countdown = result.game?.countdown;
-    flat.bet = result.game?.bet;
-    flat.prize = result.game?.prize;
-    flat.percent = result.game?.percent;
-    flat.confirmedNumbers = result.game?.confirmedNumbers;
-    flat.paid = result.game?.paid;
+  .health-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; padding: 14px; }
 
-    const usersRes = await pool.query('SELECT uid, display FROM users');
-    const displayNames = {};
-    usersRes.rows.forEach(r => { displayNames[r.uid] = r.display; });
-    flat.displayNames = displayNames;
+  .winner-row { background: var(--card2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+  .winner-left .wname { font-size:14px; font-weight:700; }
+  .winner-left .wcard { font-size:11px; color:var(--muted); margin-top:2px; }
+  .winner-right { text-align:right; }
+  .winner-right .wprize { font-size:16px; font-weight:700; color:var(--gold); }
+  .winner-right .wtime { font-size:11px; color:var(--muted); margin-top:2px; }
 
-    flat['game/countdown'] = flat.countdown;
-    flat['game/status'] = flat.status;
-    flat['game/calledNumbers'] = flat.calledNumbers;
-    flat['game/winners'] = flat.winners;
-    flat['game/bet'] = flat.bet;
-    flat['game/prize'] = flat.prize;
-    flat['game/percent'] = flat.percent;
-    flat['game/confirmedNumbers'] = flat.confirmedNumbers;
-    flat['game/paid'] = flat.paid;
-    flat['game/pendingWinner'] = flat.pendingWinner;
-    flat['game/announcement'] = flat.announcement;
-    flat['autoMode/on'] = flat.autoMode?.on;
-    flat['autoMode/phase'] = flat.autoMode?.phase;
-    flat['autoMode/cdMinutes'] = flat.autoMode?.cdMinutes;
-    flat['autoMode/round'] = flat.autoMode?.round;
-    flat['autoMode/callSpeed'] = flat.autoMode?.callSpeed;
-    flat['autoMode/botWinPercent'] = flat.autoMode?.botWinPercent;
-    flat['smartBot/enabled'] = result.smartBot?.enabled;
-    flat['bot/withdrawals'] = result.bot?.withdrawals;
-    flat['bot/settings/cbe_account'] = result.bot?.settings?.cbe_account;
-    flat['bot/settings/telebirr_account'] = result.bot?.settings?.telebirr_account;
-    flat['confirmedNumbers'] = flat.confirmedNumbers;
+  .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%) translateY(80px); background:#1a1e28; border:1px solid var(--border); border-radius:10px; padding:12px 22px; font-size:14px; font-weight:600; color:var(--text); transition:transform 0.3s ease; z-index:9999; white-space:nowrap; }
+  .toast.show { transform:translateX(-50%) translateY(0); }
+  .toast.success { border-color:var(--green); color:var(--green); }
+  .toast.error { border-color:var(--red); color:var(--red); }
+  .toast.info { border-color:var(--cyan); color:var(--cyan); }
 
-    const analyticsRows = await pool.query('SELECT key, value FROM analytics');
-    const analyticsData = {};
-    analyticsRows.rows.forEach(r => { analyticsData[r.key] = Number(r.value); });
+  .empty { color:var(--muted); text-align:center; padding:24px 20px; font-family:'Noto Sans Ethiopic',sans-serif; }
+  .loading { color:var(--muted); text-align:center; padding:24px 20px; }
 
-    flat['analytics/totalCollected']   = analyticsData['totalCollected']   || 0;
-    flat['analytics/totalPaidOut']     = analyticsData['totalPaidOut']     || 0;
-    flat['analytics/totalDeposits']    = analyticsData['totalDeposits']    || 0;
-    flat['analytics/totalWithdrawals'] = analyticsData['totalWithdrawals'] || 0;
-    flat['analytics/houseCut']         = analyticsData['houseCut']         || 0;
-    flat['analytics/botWinProfit']     = analyticsData['botWinProfit']     || 0;
-    flat['analytics/botBet']           = analyticsData['botBet']           || 0;
+  .refresh-btn { width:34px; height:34px; background:var(--card2); border:1px solid var(--border); border-radius:8px; cursor:pointer; display:flex; align-items:center; justify-content:center; font-size:16px; transition:all 0.2s; }
+  .refresh-btn:hover { border-color:var(--cyan); }
 
-    const history = (await getState('analytics/history')) || [];
-    const totalProfit = history.reduce((sum, h) => sum + (h.profit || 0), 0);
-    flat['analytics/totalProfit'] = totalProfit;
-    flat['analytics/history']     = history;
+  .promo-tag { display:inline-flex; align-items:center; gap:4px; background:#1a1e28; border:1px solid var(--border); border-radius:20px; padding:3px 10px; font-size:11px; color:var(--muted); font-weight:600; }
+  .sep { height:1px; background:var(--border); margin:0 0 14px; }
+  .file-btn { display:flex; align-items:center; gap:8px; background:var(--card2); border:1px dashed var(--border); border-radius:8px; color:var(--muted); padding:10px 14px; cursor:pointer; font-size:13px; font-family:'Noto Sans Ethiopic',sans-serif; transition:border-color 0.2s; width:100%; }
+  .file-btn:hover { border-color:var(--cyan); color:var(--text); }
+  .file-btn.has-file { border-color:var(--green); color:var(--green); }
 
-    res.json(flat);
-  } catch(e) { res.json({}); }
-});
+  /* ══ AGENT HISTORY STYLES ══ */
+  .agent-card { background:var(--card2); border:1px solid var(--border); border-radius:14px; margin-bottom:12px; overflow:hidden; transition:border-color 0.2s; }
+  .agent-card:hover { border-color:rgba(100,181,246,0.35); }
+  .agent-card-header { padding:14px 16px; display:flex; align-items:center; justify-content:space-between; cursor:pointer; user-select:none; }
+  .agent-card-header:hover { background:rgba(255,255,255,0.02); }
+  .agent-name-row { display:flex; align-items:center; gap:10px; }
+  .agent-avatar { width:40px; height:40px; border-radius:10px; background:linear-gradient(135deg,#1565c0,#0d47a1); display:flex; align-items:center; justify-content:center; font-size:18px; flex-shrink:0; }
+  .agent-name { font-size:15px; font-weight:700; color:var(--text); }
+  .agent-id-tag { font-size:11px; color:var(--muted); margin-top:2px; letter-spacing:1px; }
+  .agent-summary { display:flex; gap:7px; align-items:center; flex-wrap:wrap; }
+  .agent-sum-pill { background:rgba(0,230,118,0.08); border:1px solid rgba(0,230,118,0.2); border-radius:8px; padding:4px 9px; font-size:12px; font-weight:700; color:var(--green); text-align:center; line-height:1.3; }
+  .agent-sum-pill span { display:block; font-size:9px; color:var(--muted); font-weight:600; letter-spacing:1px; }
+  .agent-sum-pill.red { background:rgba(255,23,68,0.07); border-color:rgba(255,23,68,0.2); color:var(--red); }
+  .agent-toggle-icon { color:var(--muted); font-size:13px; transition:transform 0.3s; margin-left:4px; flex-shrink:0; }
+  .agent-toggle-icon.open { transform:rotate(180deg); }
 
-// ══ WITHDRAWALS ══
-app.get('/withdrawals', async (req, res) => {
-  try {
-    const r = await pool.query("SELECT value FROM game_state WHERE key='bot/withdrawals'");
-    const data = r.rows.length ? JSON.parse(r.rows[0].value) : {};
-    res.json({ withdrawals: data });
-  } catch(e) { res.json({ withdrawals: {} }); }
-});
+  .agent-history-body { border-top:1px solid var(--border); overflow:hidden; max-height:0; transition:max-height 0.45s ease; }
+  .agent-history-body.open { max-height:3000px; }
 
-app.get('/agents', async (req, res) => {
-  try {
-    const r = await pool.query("SELECT value FROM game_state WHERE key='agents'");
-    const data = r.rows.length ? JSON.parse(r.rows[0].value) : {};
-    res.json(data);
-  } catch(e) { res.json({}); }
-});
+  /* mini bar chart */
+  .agent-mini-chart { padding:12px 16px 14px; background:rgba(0,0,0,0.15); }
+  .mini-chart-title { font-size:10px; letter-spacing:2px; color:var(--muted); font-weight:700; margin-bottom:10px; text-transform:uppercase; }
+  .mini-bar-row { display:flex; align-items:flex-end; gap:5px; height:56px; }
+  .mini-bar-col { flex:1; display:flex; flex-direction:column; align-items:center; gap:3px; }
+  .mini-bar { width:100%; border-radius:4px 4px 0 0; min-height:3px; background:linear-gradient(180deg,var(--gold),#a07830); }
+  .mini-bar-day { font-size:9px; color:var(--muted); text-align:center; }
+  .mini-bar-amt { font-size:9px; color:var(--gold); text-align:center; white-space:nowrap; overflow:hidden; max-width:100%; }
 
-app.get('/promotions-list', async (req, res) => {
-  try {
-    const rows = await pool.query('SELECT * FROM promotions WHERE active=true ORDER BY created_at DESC');
-    res.json(rows.rows);
-  } catch(e) { res.json([]); }
-});
+  /* day section */
+  .day-section { border-bottom:1px solid rgba(30,35,48,0.9); }
+  .day-section:last-of-type { border-bottom:none; }
+  .day-header { padding:10px 16px; display:flex; align-items:center; justify-content:space-between; background:rgba(0,0,0,0.18); }
+  .day-label { font-size:12px; font-weight:700; letter-spacing:2px; color:var(--cyan); }
+  .day-stats-row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .day-stat-val { font-size:12px; font-weight:700; }
 
-app.post('/delete-promotion', async (req, res) => {
-  try {
-    const { id } = req.body;
+  /* bar rows */
+  .day-bars { padding:8px 16px 4px; }
+  .dbar-row { display:flex; align-items:center; gap:8px; margin-bottom:5px; }
+  .dbar-lbl { width:62px; font-size:10px; color:var(--muted); letter-spacing:1px; flex-shrink:0; }
+  .dbar-track { flex:1; background:rgba(255,255,255,0.04); border-radius:4px; height:14px; overflow:hidden; }
+  .dbar-fill { height:100%; border-radius:4px; }
+  .dbar-fill.approved { background:linear-gradient(90deg,#00c853,#1b5e20); }
+  .dbar-fill.rejected { background:linear-gradient(90deg,#e53935,#7f0000); }
+  .dbar-val { width:60px; font-size:10px; text-align:right; flex-shrink:0; }
 
-    // photo_url ያምጣል ከ Cloudinary ለ delete
-    const r = await pool.query('SELECT photo_url FROM promotions WHERE id=$1', [id]);
-    const photoUrl = r.rows[0]?.photo_url || '';
+  /* tx list */
+  .tx-list { padding:4px 12px 10px; }
+  .tx-row { display:flex; align-items:center; justify-content:space-between; padding:6px 10px; border-radius:7px; margin-bottom:3px; background:rgba(0,0,0,0.12); gap:6px; flex-wrap:wrap; }
+  .tx-row:hover { background:rgba(255,255,255,0.03); }
+  .tx-user { font-size:12px; color:var(--text); font-weight:600; flex:1; min-width:70px; }
+  .tx-method { font-size:10px; color:var(--blue); letter-spacing:1px; }
+  .tx-amount { font-size:13px; font-weight:700; color:var(--gold); white-space:nowrap; }
+  .tx-ok { font-size:10px; color:var(--green); letter-spacing:1px; font-weight:700; }
+  .tx-no { font-size:10px; color:var(--red); letter-spacing:1px; font-weight:700; }
+  .tx-time { font-size:10px; color:var(--muted); white-space:nowrap; }
+  .no-tx { font-size:12px; color:var(--muted); text-align:center; padding:10px 0; font-family:'Noto Sans Ethiopic',sans-serif; }
+</style>
+</head>
+<body>
 
-    // Cloudinary ላይ ይሰርዛል
-    if (photoUrl) {
-      try {
-        const match = photoUrl.match(/\/upload\/(?:v\d+\/)?(.+)\.[a-z]+$/i);
-        const publicId = match ? match[1] : null;
-        if (publicId) {
-          const auth = Buffer.from(`${CLOUDINARY_API_KEY}:${CLOUDINARY_API_SECRET}`).toString('base64');
-          const postData = JSON.stringify({ public_ids: [publicId] });
-          await new Promise((resolve) => {
-            const options = {
-              hostname: 'api.cloudinary.com',
-              path: `/v1_1/${CLOUDINARY_CLOUD}/resources/image/upload`,
-              method: 'DELETE',
-              headers: {
-                'Authorization': `Basic ${auth}`,
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(postData)
-              }
-            };
-            const req2 = https.request(options, (r2) => { r2.on('data', ()=>{}); r2.on('end', resolve); });
-            req2.on('error', resolve);
-            req2.write(postData); req2.end();
-          });
-          console.log(`🗑️ Cloudinary deleted: ${publicId}`);
-        }
-      } catch(e) { console.error('❌ Cloudinary delete error:', e.message); }
-    }
+<!-- HEADER -->
+<div class="header">
+  <div class="logo">BINGO</div>
+  <div class="header-badges">
+    <div class="badge round">🔄 <span id="roundNum">—</span></div>
+    <div class="badge players">👥 <span id="playerCount">—</span></div>
+    <div class="badge cards">🃏 <span id="cardCount">—</span></div>
+    <div class="badge prize">💰 <span id="prizeAmt">—</span> ብር</div>
+  </div>
+</div>
 
-    // DB ላይ ይሰርዛል
-    await pool.query('DELETE FROM promotions WHERE id=$1', [id]);
-    res.json({ ok: true });
-  } catch(e) { res.json({ ok: false, msg: e.message }); }
-});
+<!-- NAV TABS -->
+<div class="nav-tabs">
+  <button class="nav-tab active" onclick="switchPage('home')">🏠 HOME</button>
+  <button class="nav-tab" onclick="switchPage('withdrawals')">💸 WITHDRAWALS <span id="wdTabBadge"></span></button>
+  <button class="nav-tab" onclick="switchPage('notifications')">🔔 NOTIFS</button>
+  <button class="nav-tab" onclick="switchPage('analytics')">📊 ANALYTICS</button>
+  <button class="nav-tab" onclick="switchPage('winners')">🏆 WINNERS</button>
+  <button class="nav-tab" onclick="switchPage('promotions')">📢 PROMOS</button>
+  <button class="nav-tab" onclick="switchPage('agents')">🕵️ AGENTS</button>
+  <button class="nav-tab" onclick="switchPage('settings')">⚙️ SETTINGS</button>
+</div>
 
-// ══ SEND NOW PHOTO SAVE ══
-app.post('/save-promo-photo', multer({ storage: multer.memoryStorage() }).single('photo'), async (req, res) => {
-  const photoBuffer = req.file ? req.file.buffer : null;
-  if (!photoBuffer) return res.json({ ok: false, msg: '❌ Photo የለም!' });
-  try {
-    const auth = Buffer.from(`${CLOUDINARY_API_KEY}:${CLOUDINARY_API_SECRET}`).toString('base64');
-    const boundary = '----FormBoundary' + Date.now();
-    const body = Buffer.concat([
-      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="promo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
-      photoBuffer,
-      Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="upload_preset"\r\n\r\nunsigned_preset\r\n--${boundary}--\r\n`)
-    ]);
-    const photoUrl = await new Promise((resolve) => {
-      const options = {
-        hostname: 'api.cloudinary.com',
-        path: `/v1_1/${CLOUDINARY_CLOUD}/image/upload`,
-        method: 'POST',
-        headers: {
-          'Content-Type': `multipart/form-data; boundary=${boundary}`,
-          'Content-Length': body.length,
-          'Authorization': `Basic ${auth}`
-        }
-      };
-      const req2 = https.request(options, (r) => {
-        let d = '';
-        r.on('data', c => d += c);
-        r.on('end', () => { try { resolve(JSON.parse(d).secure_url || ''); } catch { resolve(''); } });
-      });
-      req2.on('error', () => resolve(''));
-      req2.write(body); req2.end();
-    });
+<!-- ══════════════ PAGE: HOME ══════════════ -->
+<div class="page active" id="page-home">
+<div class="main">
 
-    // DB ውስጥ temp promo ያስቀምጣል (active=false, interval=0)
-    const result = await pool.query(
-      'INSERT INTO promotions(text,photo_url,target_type,interval_ms,active,created_at) VALUES($1,$2,$3,$4,false,$5) RETURNING id',
-      ['__send_now__', photoUrl, 'bot', 0, Date.now()]
-    );
-    res.json({ ok: true, photoUrl, promoId: result.rows[0].id });
-  } catch(e) { res.json({ ok: false, msg: e.message }); }
-});
+  <div class="auto-card">
+    <div class="auto-header">
+      <div class="auto-title-row">
+        <div class="status-dot off" id="statusDot"></div>
+        <div class="auto-title" id="autoTitle">SERVER AUTO — LOADING</div>
+      </div>
+      <button class="collapse-btn" id="collapseBtn" onclick="toggleCollapse()">▲</button>
+    </div>
+    <div style="padding:0 18px 12px; color:var(--muted); font-size:12px; font-family:'Noto Sans Ethiopic',sans-serif; line-height:1.5;">
+      Time ምሪጥ — game እራሱ ይጀምራል, ይጨዋጣል, አሸናፊ ይወጃል, ደሞ ይስጀምራል!
+    </div>
+    <div class="collapsible" id="collapseBody" style="max-height:600px">
+      <div class="divider"></div>
+      <div class="section-label">⏱ BETWEEN-GAME COUNTDOWN</div>
+      <div class="cd-grid" id="cdGrid">
+        <button class="cd-btn" onclick="selectCD(1)">1 MIN</button>
+        <button class="cd-btn" onclick="selectCD(2)">2 MIN</button>
+        <button class="cd-btn" onclick="selectCD(3)">3 MIN</button>
+        <button class="cd-btn" onclick="selectCD(4)">4 MIN</button>
+        <button class="cd-btn" onclick="selectCD(5)">5 MIN</button>
+        <button class="cd-btn" onclick="selectCD(6)">6 MIN</button>
+        <button class="cd-btn" onclick="selectCD(7)">7 MIN</button>
+      </div>
+      <div class="saved-msg" id="savedMsg" style="display:none">✅ Saved: <span id="savedMin">—</span> ደቂቃ</div>
+      <div class="speed-row">
+        <span class="speed-label">Number call speed:</span>
+        <select class="speed-select" id="speedSelect" onchange="saveSettings()">
+          <option value="3000">3 sec</option>
+          <option value="4000">4 sec</option>
+          <option value="5000">5 sec</option>
+          <option value="6000" selected>6 sec</option>
+          <option value="8000">8 sec</option>
+          <option value="10000">10 sec</option>
+        </select>
+      </div>
+      <button class="main-btn btn-stop" id="mainBtn" onclick="toggleAuto()">
+        <span id="btnIcon">⏹</span>
+        <span id="btnText">STOP AUTO</span>
+      </button>
+      <div class="phase-card">
+        <div>
+          <div class="phase-lbl">CURRENT PHASE</div>
+          <div class="phase-value"><span id="phaseIcon">⏱</span><span id="phaseText">COUNTDOWN</span></div>
+          <div class="phase-sub" id="phaseSub">Railway server ያስተዳድራል</div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;">
+          <div class="phase-lbl">TIME</div>
+          <div id="countdownDisplay" style="font-size:20px;font-weight:700;color:var(--gold);">—</div>
+          <div class="phase-bar"></div>
+        </div>
+      </div>
+    </div>
+  </div>
 
-// ══ DELETE SEND NOW PHOTO ══
-app.post('/delete-promo-photo', async (req, res) => {
-  try {
-    const { promoId, photoUrl } = req.body;
+  <!-- GAME SETTINGS -->
+  <div class="auto-card" style="border-color:#1565c0;">
+    <div class="auto-header">
+      <div class="auto-title" style="color:var(--blue);">⚙️ GAME SETTINGS</div>
+    </div>
+    <div class="divider"></div>
+    <div class="speed-row">
+      <span class="speed-label">Bet (ብር):</span>
+      <input type="number" class="speed-select" id="betAmount" min="1" placeholder="ለምሳሌ 10" style="min-width:120px;">
+    </div>
+    <div class="speed-row">
+      <span class="speed-label">Prize %:</span>
+      <select class="speed-select" id="prizePercent">
+        <option value="60">60%</option>
+        <option value="70">70%</option>
+        <option value="80" selected>80%</option>
+        <option value="90">90%</option>
+        <option value="100">100%</option>
+      </select>
+    </div>
+    <button class="main-btn btn-blue" onclick="saveGameSettings()">💾 SAVE SETTINGS</button>
+  </div>
 
-    // Cloudinary ላይ ይሰርዛል
-    if (photoUrl) {
-      try {
-        const match = photoUrl.match(/\/upload\/(?:v\d+\/)?(.+)\.[a-z]+$/i);
-        const publicId = match ? match[1] : null;
-        if (publicId) {
-          const auth = Buffer.from(`${CLOUDINARY_API_KEY}:${CLOUDINARY_API_SECRET}`).toString('base64');
-          const postData = JSON.stringify({ public_ids: [publicId] });
-          await new Promise((resolve) => {
-            const options = {
-              hostname: 'api.cloudinary.com',
-              path: `/v1_1/${CLOUDINARY_CLOUD}/resources/image/upload`,
-              method: 'DELETE',
-              headers: {
-                'Authorization': `Basic ${auth}`,
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(postData)
-              }
-            };
-            const req2 = https.request(options, (r2) => { r2.on('data', ()=>{}); r2.on('end', resolve); });
-            req2.on('error', resolve);
-            req2.write(postData); req2.end();
-          });
-          console.log(`🗑️ Cloudinary deleted: ${publicId}`);
-        }
-      } catch(e) { console.error('❌ Cloudinary delete error:', e.message); }
-    }
+  <!-- SMART BOT -->
+  <div class="auto-card" style="border-color:#9c27b0;">
+    <div class="auto-header">
+      <div class="auto-title-row">
+        <div class="status-dot off" id="botDot"></div>
+        <div class="auto-title" id="botTitle" style="color:var(--purple);">SMART BOT — OFF</div>
+      </div>
+    </div>
+    <div class="divider"></div>
+    <div class="speed-row" style="margin-top:6px;">
+      <span class="speed-label">Game Bias:</span>
+      <select class="speed-select" id="gameBias" onchange="saveBias()">
+        <option value="0.10">0.10 — በጣም ይከብዳል</option>
+        <option value="0.20">0.20 — ይከብዳል</option>
+        <option value="0.30">0.30 — መካከለኛ</option>
+        <option value="0.40">0.40 — ትንሽ ቀላል</option>
+        <option value="0.50" selected>0.50 — Fair</option>
+        <option value="0.60">0.60 — ቀላል</option>
+        <option value="0.70">0.70 — ቶሎ ያልቃል</option>
+      </select>
+    </div>
+    <div class="speed-row" style="margin-top:6px;">
+      <span class="speed-label">Bot Win %:</span>
+      <select class="speed-select" id="botWinPct">
+        <option value="0">0%</option>
+        <option value="10">10%</option>
+        <option value="20">20%</option>
+        <option value="30">30%</option>
+        <option value="40">40%</option>
+        <option value="50" selected>50%</option>
+        <option value="60">60%</option>
+        <option value="70">70%</option>
+        <option value="80">80%</option>
+        <option value="90">90%</option>
+        <option value="100">100%</option>
+      </select>
+    </div>
+    <button class="main-btn" onclick="saveBotSettings()" 
+  style="background:linear-gradient(135deg,#f57c00,#e65100);margin-bottom:0;">
+  💾 SAVE BOT SETTINGS
+</button>
+    <button class="main-btn btn-purple" id="botBtn" onclick="toggleBot()">
+      <span id="botBtnIcon">▶</span>
+      <span id="botBtnText">ENABLE SMART BOT</span>
+    </button>
+    <button class="main-btn" onclick="removeBots()" style="background:linear-gradient(135deg,#e53935,#b71c1c);margin-top:0;">
+      🗑️ REMOVE ALL BOTS
+    </button>
+  </div>
+<div class="auto-card" style="border-color:var(--gold);">
+  <div class="auto-header">
+    <div class="auto-title-row">
+      <div class="status-dot off" id="wdDot"></div>
+      <div class="auto-title" id="wdTitle" style="color:var(--gold);">WITHDRAWAL — LOADING</div>
+    </div>
+  </div>
+  <div class="divider"></div>
+  <div style="padding:14px 18px;color:var(--muted);font-size:13px;font-family:'Noto Sans Ethiopic',sans-serif;">
+    Off ሲሆን users withdrawal መጠየቅ አይችሉም
+  </div>
+  <button class="main-btn btn-start" id="wdBtn" onclick="toggleWithdrawal()">
+    <span id="wdBtnIcon">⏹</span>
+    <span id="wdBtnText">LOADING...</span>
+  </button>
+</div>
+  <!-- GIVE BALANCE -->
+  <div class="auto-card" style="border-color:var(--green);">
+    <div class="auto-header"><div class="auto-title" style="color:var(--green);">💰 GIVE BALANCE</div></div>
+    <div class="divider"></div>
+    <div class="field-row" style="padding-top:12px;">
+      <div class="field-lbl">TELEGRAM ID</div>
+      <input type="text" class="field-input" id="giveUid" placeholder="User ID">
+    </div>
+    <div class="field-row">
+      <div class="field-lbl">AMOUNT (ብር)</div>
+      <input type="number" class="field-input" id="giveAmount" min="1" placeholder="ብር">
+    </div>
+    <button class="main-btn btn-start" onclick="giveBalance()">💰 GIVE BALANCE</button>
+  </div>
 
-    // DB ላይ ይሰርዛል
-    if (promoId) await pool.query('DELETE FROM promotions WHERE id=$1', [promoId]);
-    res.json({ ok: true });
-  } catch(e) { res.json({ ok: false, msg: e.message }); }
-});
+  <div class="auto-card" style="border-color:var(--cyan);">
+    <div class="auto-header"><div class="auto-title" style="color:var(--cyan);">🔧 UPDATE BALANCE</div></div>
+    <div class="divider"></div>
+    <div class="field-row" style="padding-top:12px;">
+      <div class="field-lbl">TELEGRAM ID</div>
+      <input type="text" class="field-input" id="updateUid" placeholder="User ID">
+    </div>
+    <div class="field-row">
+      <div class="field-lbl">AMOUNT (ብር)</div>
+      <input type="number" class="field-input" id="updateAmount" min="1" placeholder="ብር">
+    </div>
+    <div class="speed-row" style="padding-top:0;">
+      <span class="speed-label">Type:</span>
+      <select class="speed-select" id="updateType">
+        <option value="add">➕ Add</option>
+        <option value="subtract">➖ Subtract</option>
+      </select>
+    </div>
+    <button class="main-btn btn-cyan" onclick="updateBalance()">🔧 UPDATE BALANCE</button>
+  </div>
 
-app.post('/give-balance', async (req, res) => {
-  try {
-    const { uid, amount } = req.body;
-    await pool.query(
-      'INSERT INTO users(uid,display,balance) VALUES($1,$2,$3) ON CONFLICT(uid) DO UPDATE SET balance=users.balance+$3',
-      [uid, uid, amount]
-    );
-    const r = await pool.query('SELECT balance FROM users WHERE uid=$1', [uid]);
-    const newBal = r.rows[0]?.balance || 0;
-    broadcast({ type: 'balance', uid, balance: newBal });
-    await updateAnalytics('totalDeposits', Number(amount));
-    res.json({ ok: true });
-  } catch(e) { res.json({ ok: false, msg: e.message }); }
-});
+  <div class="auto-card" style="border-color:#ff9800;">
+    <div class="auto-header">
+      <div class="auto-title" style="color:#ff9800;">🖥️ SERVER HEALTH</div>
+      <button class="refresh-btn" onclick="fetchHealth()">🔄</button>
+    </div>
+    <div class="divider"></div>
+    <div class="health-grid" id="healthGrid"><div class="loading">Loading...</div></div>
+  </div>
 
-app.post('/save-accounts', async (req, res) => {
-  try {
-    const { cbe, telebirr } = req.body;
-    if (cbe) await setState('bot/settings/cbe_account', cbe);
-    if (telebirr) await setState('bot/settings/telebirr_account', telebirr);
-    res.json({ ok: true });
-  } catch(e) { res.json({ ok: false }); }
-});
+</div>
+</div>
 
-app.post('/withdrawal-action', async (req, res) => {
-  try {
-    const { key, action, uid, amount } = req.body;
-    const allWd = JSON.parse(
-      (await pool.query("SELECT value FROM game_state WHERE key='bot/withdrawals'")).rows[0]?.value || '{}'
-    );
-    if (!allWd[key]) return res.json({ ok: false, msg: 'Not found' });
+<!-- ══════════════ PAGE: WITHDRAWALS ══════════════ -->
+<div class="page" id="page-withdrawals">
+<div class="main">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+    <div style="color:var(--gold);font-size:16px;font-weight:700;letter-spacing:2px;">💸 WITHDRAWALS</div>
+    <button class="refresh-btn" onclick="fetchWithdrawals()">🔄</button>
+  </div>
+ 
+  <div id="wdList"><div class="loading">Loading...</div></div>
+</div>
+</div>
 
-    allWd[key].status = action === 'approve' ? 'approved' : 'rejected';
-    await setState('bot/withdrawals', allWd);
+<!-- ══════════════ PAGE: NOTIFICATIONS ══════════════ -->
+<div class="page" id="page-notifications">
+<div class="main">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+    <div style="color:var(--purple);font-size:16px;font-weight:700;letter-spacing:2px;">🔔 NOTIFICATIONS</div>
+    <button class="refresh-btn" onclick="fetchNotifications()">🔄</button>
+  </div>
+  <div id="notifList"><div class="loading">Loading...</div></div>
+</div>
+</div>
 
-    if (action === 'approve') {
-      await updateAnalytics('totalWithdrawals', amount);
-      await pool.query(
-        "UPDATE game_state SET value='0' WHERE key=$1",
-        [`users/${uid}/pending_withdrawal`]
-      );
-      const wd = allWd[key];
-      const method = wd?.method || 'ባንክ';
-      const account = wd?.account || '—';
-      await pool.query(
-        'INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
-        [uid, `✅ ${amount} ብር በ ${method} ተላከ!\n📋 Account: ${account}`, Date.now()]
-      );
-    } else {
-      await pool.query('UPDATE users SET balance=balance+$1 WHERE uid=$2', [amount, uid]);
-      const r = await pool.query('SELECT balance FROM users WHERE uid=$1', [uid]);
-      const newBal = r.rows[0]?.balance || 0;
-      broadcast({ type: 'balance', uid, balance: newBal });
-      await pool.query(
-        'INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
-        [uid, `❌ Withdrawal rejected — ${amount} ብር balance ላይ ተመለሰ!`, Date.now()]
-      );
-    }
-    res.json({ ok: true });
-  } catch(e) { res.json({ ok: false, msg: e.message }); }
-});
+<!-- ══════════════ PAGE: ANALYTICS ══════════════ -->
+<div class="page" id="page-analytics">
+<div class="main">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+    <div style="color:var(--cyan);font-size:16px;font-weight:700;letter-spacing:2px;">📊 ANALYTICS</div>
+    <div style="display:flex;gap:8px;">
+      <button class="refresh-btn" onclick="fetchAnalytics()">🔄</button>
+      <button class="refresh-btn" onclick="clearAnalytics()" style="border-color:var(--red);color:var(--red);">🗑️</button>
+    </div>
+  </div>
+  <div id="analyticsList"><div class="loading">Loading...</div></div>
+</div>
+</div>
 
-app.post('/add-agent', async (req, res) => {
-  try {
-    const { name, id_number } = req.body;
-    const agents = JSON.parse(
-      (await pool.query("SELECT value FROM game_state WHERE key='agents'")).rows[0]?.value || '{}'
-    );
-    agents[name] = { id_number };
-    await setState('agents', agents);
-    res.json({ ok: true });
-  } catch(e) { res.json({ ok: false }); }
-});
+<!-- ══════════════ PAGE: WINNERS ══════════════ -->
+<div class="page" id="page-winners">
+<div class="main">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+    <div style="color:var(--gold);font-size:16px;font-weight:700;letter-spacing:2px;">🏆 ALL WINNERS</div>
+    <button class="refresh-btn" onclick="fetchWinners()">🔄</button>
+  </div>
+  <div id="winnersList"><div class="loading">Loading...</div></div>
+</div>
+</div>
 
-app.post('/delete-agent', async (req, res) => {
-  try {
-    const { name } = req.body;
-    const agents = JSON.parse(
-      (await pool.query("SELECT value FROM game_state WHERE key='agents'")).rows[0]?.value || '{}'
-    );
-    delete agents[name];
-    await setState('agents', agents);
-    res.json({ ok: true });
-  } catch(e) { res.json({ ok: false }); }
-});
+<!-- ══════════════ PAGE: PROMOTIONS ══════════════ -->
+<div class="page" id="page-promotions">
+<div class="main">
+  <div class="auto-card" style="border-color:#ff9800;">
+    <div class="auto-header"><div class="auto-title" style="color:#ff9800;">📤 SEND NOW</div></div>
+    <div class="divider"></div>
+    <div class="field-row" style="padding-top:12px;">
+      <div class="field-lbl">MESSAGE</div>
+      <textarea class="field-input" id="promoText" placeholder="Promotion message..."></textarea>
+    </div>
+    <div class="field-row">
+      <div class="field-lbl">TARGET</div>
+      <select class="field-input" id="promoTarget">
+        <option value="bot">🤖 Bot Users</option>
+        <option value="group">👥 Group</option>
+      </select>
+    </div>
+    <div class="field-row" id="promoGroupRow" style="display:none;">
+      <div class="field-lbl">GROUP ID</div>
+      <input type="text" class="field-input" id="promoGroupId" placeholder="-100xxxxxxxxxx">
+    </div>
+    <div class="field-row">
+  <div class="field-lbl">PHOTO (optional)</div>
+  <div style="display:flex;gap:8px;align-items:center;">
+    <label class="file-btn" id="promoFileLabel" style="flex:1;">📷 Choose Photo
+      <input type="file" id="promoFile" accept="image/*" style="display:none;" onchange="onPromoFileChange()">
+    </label>
+    <button id="promoFileX" onclick="removePromoPhoto()" style="display:none;background:var(--red);border:none;border-radius:8px;color:#fff;width:34px;height:34px;cursor:pointer;font-size:16px;flex-shrink:0;">✕</button>
+  </div>
+</div>
+    <button class="main-btn btn-gold" onclick="sendPromo()">📤 SEND NOW</button>
+  </div>
 
-app.post('/change-agent-pass', async (req, res) => {
-  try {
-    const { password } = req.body;
-    await setState('settings/agent_password', password);
-    res.json({ ok: true });
-  } catch(e) { res.json({ ok: false }); }
-});
+  <div class="auto-card" style="border-color:var(--cyan);">
+    <div class="auto-header"><div class="auto-title" style="color:var(--cyan);">⏰ AUTO INTERVAL PROMO</div></div>
+    <div class="divider"></div>
+    <div class="field-row" style="padding-top:12px;">
+      <div class="field-lbl">MESSAGE</div>
+      <textarea class="field-input" id="intervalText" placeholder="Auto promotion message..."></textarea>
+    </div>
+    <div class="field-row">
+      <div class="field-lbl">INTERVAL</div>
+      <select class="field-input" id="intervalMs">
+        <option value="1800000">30 ደቂቃ</option>
+        <option value="3600000" selected>1 ሰዓት</option>
+        <option value="7200000">2 ሰዓት</option>
+        <option value="10800000">3 ሰዓት</option>
+        <option value="21600000">6 ሰዓት</option>
+        <option value="43200000">12 ሰዓት</option>
+        <option value="86400000">1 ቀን</option>
+      </select>
+    </div>
+    <div class="field-row">
+      <div class="field-lbl">TARGET</div>
+      <select class="field-input" id="intervalTarget">
+        <option value="bot">🤖 Bot Users</option>
+        <option value="group">👥 Group</option>
+      </select>
+    </div>
+    <div class="field-row" id="intervalGroupRow" style="display:none;">
+      <div class="field-lbl">GROUP ID</div>
+      <input type="text" class="field-input" id="intervalGroupId" placeholder="-100xxxxxxxxxx">
+    </div>
+    <div class="field-row">
+      <div class="field-lbl">PHOTO (optional)</div>
+      <label class="file-btn" id="intervalFileLabel">📷 Choose Photo
+        <input type="file" id="intervalFile" accept="image/*" style="display:none;" onchange="onFileChange('intervalFile','intervalFileLabel')">
+      </label>
+    </div>
+    <button class="main-btn btn-cyan" onclick="createIntervalPromo()">⏰ CREATE INTERVAL PROMO</button>
+  </div>
 
-app.post('/remove-bots', async (req, res) => {
-  try {
-    await pool.query('DELETE FROM users WHERE is_bot = true');
-    res.json({ ok: true });
-  } catch(e) { res.json({ ok: false, msg: e.message }); }
-});
+  <div class="auto-card" style="border-color:var(--border);">
+    <div class="auto-header">
+      <div class="auto-title" style="color:var(--text);">📋 ACTIVE PROMOS</div>
+      <button class="refresh-btn" onclick="fetchPromos()">🔄</button>
+    </div>
+    <div class="divider"></div>
+    <div id="promoList" style="padding:14px;"><div class="loading">Loading...</div></div>
+  </div>
+</div>
+</div>
 
-app.get('/unread-notifications', async (req, res) => {
-  try {
-    const r = await pool.query(
-      'SELECT id, uid, message FROM notifications WHERE read=false ORDER BY time ASC LIMIT 50'
-    );
-    res.json(r.rows);
-  } catch(e) { res.json([]); }
-});
+<!-- ══════════════ PAGE: AGENTS ══════════════ -->
+<div class="page" id="page-agents">
+<div class="main">
 
-app.post('/mark-notification-read', async (req, res) => {
-  try {
-    const { id } = req.body;
-    await pool.query('UPDATE notifications SET read=true WHERE id=$1', [id]);
-    res.json({ ok: true });
-  } catch(e) { res.json({ ok: false }); }
-});
+  <div class="auto-card" style="border-color:var(--blue);">
+    <div class="auto-header"><div class="auto-title" style="color:var(--blue);">➕ ADD AGENT</div></div>
+    <div class="divider"></div>
+    <div class="field-row" style="padding-top:12px;">
+      <div class="field-lbl">AGENT NAME</div>
+      <input type="text" class="field-input" id="agentName" placeholder="ስም">
+    </div>
+    <div class="field-row">
+      <div class="field-lbl">ID NUMBER</div>
+      <input type="text" class="field-input" id="agentId" placeholder="ቁጥር">
+    </div>
+    <button class="main-btn btn-blue" onclick="addAgent()">➕ ADD AGENT</button>
+  </div>
 
-app.post('/update-balance', async (req, res) => {
-  try {
-    const { uid, amount, type } = req.body;
-    if (type === 'add') {
-      await pool.query('UPDATE users SET balance = balance + $1 WHERE uid=$2', [amount, uid]);
-    } else {
-      await pool.query('UPDATE users SET balance = GREATEST(0, balance - $1) WHERE uid=$2', [amount, uid]);
-    }
-    const r = await pool.query('SELECT balance FROM users WHERE uid=$1', [uid]);
-    const newBal = r.rows[0]?.balance || 0;
-    broadcast({ type: 'balance', uid, balance: newBal });
-    res.json({ ok: true, balance: newBal });
-  } catch(e) { res.json({ ok: false, msg: e.message }); }
-});
+  <div class="auto-card" style="border-color:var(--gold);">
+    <div class="auto-header"><div class="auto-title" style="color:var(--gold);">🔐 AGENT PASSWORD</div></div>
+    <div class="divider"></div>
+    <div class="field-row" style="padding-top:12px;">
+      <div class="field-lbl">NEW PASSWORD</div>
+      <input type="password" class="field-input" id="agentPass" placeholder="Password">
+    </div>
+    <button class="main-btn btn-gold" onclick="changeAgentPass()">🔐 CHANGE PASSWORD</button>
+  </div>
 
-app.get('/get-balance', async (req, res) => {
-  try {
-    const { uid } = req.query;
-    const r = await pool.query('SELECT balance FROM users WHERE uid=$1', [uid]);
-    res.json({ balance: r.rows[0]?.balance || 0 });
-  } catch(e) { res.json({ balance: 0 }); }
-});
+  <div class="auto-card" style="border-color:var(--border);">
+    <div class="auto-header">
+      <div class="auto-title" style="color:var(--text);">👥 AGENTS &amp; HISTORY</div>
+      <button class="refresh-btn" onclick="fetchAgents()">🔄</button>
+    </div>
+    <div class="divider"></div>
+    <div id="agentsList" style="padding:14px;"><div class="loading">Loading...</div></div>
+  </div>
 
-// ══ WITHDRAWAL TOGGLE ══
-app.get('/withdrawal-status', async (req, res) => {
-  try {
-    const enabled = (await getState('settings/withdrawal_enabled')) ?? true;
-    res.json({ enabled });
-  } catch(e) { res.json({ enabled: true }); }
-});
+</div>
+</div>
 
-app.post('/withdrawal-toggle', async (req, res) => {
-  try {
-    const { enabled } = req.body;
-    await setState('settings/withdrawal_enabled', enabled);
-    broadcast({ type: 'withdrawal_status', enabled });
-    res.json({ ok: true, enabled });
-  } catch(e) { res.json({ ok: false, msg: e.message }); }
-});
+<!-- ══════════════ PAGE: SETTINGS ══════════════ -->
+<div class="page" id="page-settings">
+<div class="main">
+  <div class="auto-card" style="border-color:var(--red);">
+    <div class="auto-header"><div class="auto-title" style="color:var(--red);">🔒 ADMIN CONFIG</div></div>
+    <div class="divider"></div>
+    <div class="field-row" style="padding-top:12px;">
+      <div class="field-lbl">LOGIN PASSWORD</div>
+      <input type="password" class="field-input" id="loginPass" placeholder="Login password">
+    </div>
+    <div class="field-row">
+      <div class="field-lbl">SETTINGS PASSWORD</div>
+      <input type="password" class="field-input" id="settingsPass" placeholder="Settings password">
+    </div>
+    <button class="main-btn btn-stop" onclick="saveConfig()">🔒 SAVE CONFIG</button>
+  </div>
 
-// ══ CLEAR ANALYTICS ══
-app.post('/clear-analytics', async (req, res) => {
-  try {
-    await pool.query('DELETE FROM analytics');
-    await setState('analytics/history', []);
-    console.log('🔄 Analytics manually cleared');
-    res.json({ ok: true });
-  } catch(e) { res.json({ ok: false, msg: e.message }); }
-});
+  <div class="auto-card" style="border-color:var(--green);">
+    <div class="auto-header"><div class="auto-title" style="color:var(--green);">🏦 PAYMENT ACCOUNTS</div></div>
+    <div class="divider"></div>
+    <div class="field-row" style="padding-top:12px;">
+      <div class="field-lbl">CBE ACCOUNT</div>
+      <input type="text" class="field-input" id="cbeAccount" placeholder="CBE account number">
+    </div>
+    <div class="field-row">
+      <div class="field-lbl">TELEBIRR ACCOUNT</div>
+      <input type="text" class="field-input" id="telebirrAccount" placeholder="Telebirr number">
+    </div>
+    <button class="main-btn btn-start" onclick="saveAccounts()">💾 SAVE ACCOUNTS</button>
+  </div>
+</div>
+</div>
 
-// ══ CLOUDINARY ══
-const CLOUDINARY_CLOUD = 'diado1bxi';
-const CLOUDINARY_API_KEY = '117446111831141';
-const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_SECRET || 'biCrRU-O4tFt_icW8ONKE5POXJk';
+<!-- TOAST -->
+<div class="toast" id="toast"></div>
 
-let soundsMap = {};
+<script>
+const BASE = 'https://admin-panel-production-b31a.up.railway.app';
+let autoOn = false;
+let selectedCD = 2;
+let collapsed = false;
+let currentPage = 'home';
 
-async function loadCloudinarySounds() {
-  return new Promise((resolve) => {
-    const auth = Buffer.from(`${CLOUDINARY_API_KEY}:${CLOUDINARY_API_SECRET}`).toString('base64');
-    const options = {
-      hostname: 'api.cloudinary.com',
-      path: `/v1_1/${CLOUDINARY_CLOUD}/resources/video?max_results=100`,
-      method: 'GET',
-      headers: { 'Authorization': `Basic ${auth}` }
-    };
-    const req = https.request(options, (res) => {
-      let data = '';
-      res.on('data', chunk => data += chunk);
-      res.on('end', () => {
-        try {
-          const json = JSON.parse(data);
-          const resources = json.resources || [];
-          resources.forEach(r => {
-            const publicId = r.public_id;
-            const match = publicId.match(/^([A-Z]+\d+)/);
-            const key = match ? match[1] : publicId;
-            soundsMap[key] = r.secure_url;
-          });
-          console.log(`✅ Loaded ${Object.keys(soundsMap).length} sounds from Cloudinary`);
-        } catch(e) { console.error('❌ Cloudinary parse error:', e.message); }
-        resolve();
-      });
-    });
-    req.on('error', (e) => { console.error('❌ Cloudinary load error:', e.message); resolve(); });
-    req.end();
+// ── PAGE SWITCH ──
+function switchPage(page) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('page-' + page).classList.add('active');
+  document.querySelectorAll('.nav-tab').forEach(t => {
+    if (t.getAttribute('onclick') === `switchPage('${page}')`) t.classList.add('active');
   });
+  currentPage = page;
+  if (page === 'withdrawals') fetchWithdrawals();
+  if (page === 'notifications') fetchNotifications();
+  if (page === 'analytics') fetchAnalytics();
+  if (page === 'winners') fetchWinners();
+  if (page === 'promotions') fetchPromos();
+  if (page === 'agents') fetchAgents();
+  if (page === 'settings') fetchConfig();
 }
 
-app.get('/get-config', async (req, res) => {
+// ── FETCH STATE ──
+async function fetchState() {
   try {
-    const r = await pool.query("SELECT value FROM game_state WHERE key='adminConfig'");
-    const config = r.rows.length ? JSON.parse(r.rows[0].value) : { loginPassword: '1234', settingsPassword: '9999' };
-    res.json(config);
-  } catch(e) { res.json({ loginPassword: '1234', settingsPassword: '9999' }); }
-});
+    const r = await fetch(`${BASE}/game-state`);
+    const d = await r.json();
+    document.getElementById('roundNum').textContent = d['autoMode/round'] ?? '—';
+    const confirmedCards = d['game/confirmedNumbers'] || {};
+    const cards = Object.keys(confirmedCards).length;
+    const players = new Set(Object.values(confirmedCards)).size;
+    document.getElementById('cardCount').textContent = cards;
+    document.getElementById('playerCount').textContent = players;
+    document.getElementById('prizeAmt').textContent = d['game/prize'] ?? '0';
+    const on = d['autoMode/on'] === true;
+    autoOn = on; updateAutoUI(on);
+    const cd = d['autoMode/cdMinutes'];
+    if (cd) { selectedCD = Number(cd); updateCDButtons(); document.getElementById('savedMin').textContent = cd; document.getElementById('savedMsg').style.display = 'flex'; }
+    const speed = d['autoMode/callSpeed'];
+    if (speed) document.getElementById('speedSelect').value = String(speed);
+    updatePhase(d['autoMode/phase'] || 'idle');
+    const cdData = d['game/countdown'];
+    if (cdData && cdData.active && cdData.startAt) {
+      const remain = Math.max(0, Math.floor((cdData.startAt - Date.now()) / 1000));
+      document.getElementById('countdownDisplay').textContent = `${Math.floor(remain/60)}:${String(remain%60).padStart(2,'0')}`;
+    } else { document.getElementById('countdownDisplay').textContent = '—'; }
+    const botOn = d['smartBot/enabled'] === true;
+    updateBotUI(botOn);
+    const botWin = d['autoMode/botWinPercent'];
+    if (botWin !== undefined) document.getElementById('botWinPct').value = String(botWin);
+    const bias = d['autoMode/noBotBias'];
+    if (bias !== undefined) document.getElementById('gameBias').value = String(bias);
+    const bet = d['game/bet'];
+    if (bet) document.getElementById('betAmount').value = bet;
+    const pct = d['game/percent'];
+    if (pct) document.getElementById('prizePercent').value = String(pct);
+    fetchWithdrawalBadge();
+  } catch(e) { console.error(e); }
+}
 
-app.post('/save-config', async (req, res) => {
+function updateAutoUI(on) {
+  document.getElementById('statusDot').classList.toggle('off', !on);
+  document.getElementById('autoTitle').textContent = on ? 'SERVER AUTO — RUNNING' : 'SERVER AUTO — STOPPED';
+  document.getElementById('autoTitle').style.color = on ? 'var(--cyan)' : 'var(--muted)';
+  document.getElementById('mainBtn').className = 'main-btn ' + (on ? 'btn-stop' : 'btn-start');
+  document.getElementById('btnIcon').textContent = on ? '⏹' : '▶';
+  document.getElementById('btnText').textContent = on ? 'STOP AUTO' : 'START AUTO';
+}
+
+function updatePhase(phase) {
+  const icons = { countdown:'⏱', playing:'🎮', announcing:'🎉', idle:'💤' };
+  const labels = { countdown:'COUNTDOWN', playing:'PLAYING', announcing:'ANNOUNCING', idle:'IDLE' };
+  const subs = { countdown:'ቆጠራ እየሄደ ነው...', playing:'Game እየተጫወተ ነው!', announcing:'አሸናፊ ይነሳሉ...', idle:'Railway server ያስተዳድራል' };
+  document.getElementById('phaseIcon').textContent = icons[phase] || '⏱';
+  document.getElementById('phaseText').textContent = labels[phase] || phase.toUpperCase();
+  document.getElementById('phaseSub').textContent = subs[phase] || '';
+}
+
+function selectCD(min) { selectedCD = min; updateCDButtons(); saveSettings(); }
+function updateCDButtons() { document.querySelectorAll('.cd-btn').forEach((btn, i) => btn.classList.toggle('active', (i+1) === selectedCD)); }
+
+async function saveSettings() {
   try {
-    const { loginPassword, settingsPassword } = req.body;
-    const config = { loginPassword, settingsPassword };
-    await pool.query(
-      "INSERT INTO game_state(key,value) VALUES('adminConfig',$1) ON CONFLICT(key) DO UPDATE SET value=$1",
-      [JSON.stringify(config)]
-    );
-    res.json({ ok: true });
-  } catch(e) { res.json({ ok: false, msg: e.message }); }
-});
+    const speed = document.getElementById('speedSelect').value;
+    await fetch(`${BASE}/admin/set-settings`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ cdMinutes: selectedCD, callSpeed: Number(speed) }) });
+    document.getElementById('savedMin').textContent = selectedCD;
+    document.getElementById('savedMsg').style.display = 'flex';
+    showToast('✅ Saved: ' + selectedCD + ' ደቂቃ', 'success');
+  } catch(e) { showToast('❌ Save failed', 'error'); }
+}
 
-app.get('/sounds-map', (req, res) => res.json(soundsMap));
-loadCloudinarySounds();
-
-// ══ PROMOTIONS ══
-app.post('/create-interval-promotion', multer({ storage: multer.memoryStorage() }).single('photo'), async (req, res) => {
-  const { text, targetType, groupId, intervalMs } = req.body;
-  const photoBuffer = req.file ? req.file.buffer : null;
-  if (!text && !photoBuffer) return res.json({ ok: false, msg: '❌ Message ወይም Photo ያስፈልጋል!' });
+async function saveBias() {
+  const gameBias = document.getElementById('gameBias').value;
   try {
-    let photoUrl = '';
-    if (photoBuffer) {
-      const auth = Buffer.from(`${CLOUDINARY_API_KEY}:${CLOUDINARY_API_SECRET}`).toString('base64');
-      const boundary = '----FormBoundary' + Date.now();
-      const body = Buffer.concat([
-        Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="promo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
-        photoBuffer,
-        Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="upload_preset"\r\n\r\nunsigned_preset\r\n--${boundary}--\r\n`)
-      ]);
-      photoUrl = await new Promise((resolve) => {
-        const options = {
-          hostname: 'api.cloudinary.com',
-          path: `/v1_1/${CLOUDINARY_CLOUD}/image/upload`,
-          method: 'POST',
-          headers: {
-            'Content-Type': `multipart/form-data; boundary=${boundary}`,
-            'Content-Length': body.length,
-            'Authorization': `Basic ${auth}`
-          }
-        };
-        const request = require('https').request(options, (r) => {
-          let d = '';
-          r.on('data', chunk => d += chunk);
-          r.on('end', () => { try { resolve(JSON.parse(d).secure_url || ''); } catch(e) { resolve(''); } });
-        });
-        request.on('error', () => resolve(''));
-        request.write(body); request.end();
-      });
-    }
-    await pool.query(
-      'INSERT INTO promotions(text,photo_url,target_type,group_id,interval_ms,next_send_at,active,created_at) VALUES($1,$2,$3,$4,$5,$6,true,$7)',
-      [text || '', photoUrl, targetType || 'bot', groupId || '', Number(intervalMs) || 3600000, Date.now() + Number(intervalMs), Date.now()]
-    );
-    res.json({ ok: true, msg: '✅ Interval promotion ተጀምሯል!' });
-  } catch(e) { res.json({ ok: false, msg: '❌ Error: ' + e.message }); }
-});
+    const r = await fetch(`${BASE}/admin/set-settings`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ noBotBias: Number(gameBias) }) });
+    const d = await r.json();
+    if (d.ok) showToast('✅ Bias saved: ' + gameBias, 'success'); else showToast('❌ Error', 'error');
+  } catch(e) { showToast('❌ Connection error', 'error'); }
+}
 
-app.post('/send-promotion', multer({ storage: multer.memoryStorage() }).single('photo'), async (req, res) => {
-  const { text, targetType, groupId } = req.body;
-  const photoBuffer = req.file ? req.file.buffer : null;
-  if (!text && !photoBuffer) return res.json({ ok: false, msg: '❌ Message ወይም Photo ያስፈልጋል!' });
+async function saveGameSettings() {
+  const bet = document.getElementById('betAmount').value;
+  const percent = document.getElementById('prizePercent').value;
+  const gameBias = document.getElementById('gameBias').value;
+  if (!bet) return showToast('❌ Bet ያስገባ!', 'error');
   try {
-    await broadcastPromotion({ text, photoBuffer, targetType, groupId });
-    res.json({ ok: true, msg: '✅ Promotion ተላከ!' });
-  } catch(e) { res.json({ ok: false, msg: '❌ Error: ' + e.message }); }
-});
+    const r = await fetch(`${BASE}/admin/set-settings`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ bet: Number(bet), percent: Number(percent), noBotBias: Number(gameBias) }) });
+    const d = await r.json();
+    if (d.ok) showToast('✅ Settings saved!', 'success'); else showToast('❌ Error', 'error');
+  } catch(e) { showToast('❌ Connection error', 'error'); }
+}
 
-// ══ PROMOTION BROADCAST — ቀጥታ Telegram API ══
-async function broadcastPromotion(promoData) {
+async function toggleAuto() {
+  const btn = document.getElementById('mainBtn');
+  btn.style.opacity = '0.6'; btn.style.pointerEvents = 'none';
   try {
-    const { text, photoBuffer, photoUrl, targetType, groupId } = promoData;
-    const BOT_TOKEN = process.env.BOT_TOKEN || '';
-
-    if (!BOT_TOKEN) {
-      console.error('❌ BOT_TOKEN not set!');
-      return;
-    }
-
-    // ── Group ሲሆን ──
-    if (targetType === 'group' && groupId) {
-      const bodyData = JSON.stringify({ chat_id: groupId, text: text || '', parse_mode: 'HTML' });
-      await new Promise((resolve) => {
-        const opts = {
-          hostname: 'api.telegram.org',
-          path: `/bot${BOT_TOKEN}/sendMessage`,
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(bodyData) }
-        };
-        const r2 = https.request(opts, (r) => { r.on('data', ()=>{}); r.on('end', resolve); });
-        r2.on('error', resolve);
-        r2.write(bodyData); r2.end();
-      });
-      console.log('✅ Group promotion sent!');
-      return;
-    }
-
-    // ── Bot Users ሁሉ ──
-    const usersRes = await pool.query('SELECT uid FROM users WHERE is_bot = false');
-    const uids = usersRes.rows.map(r => r.uid);
-    console.log(`📢 Sending promotion to ${uids.length} users...`);
-
-    for (const uid of uids) {
-      try {
-        if (photoBuffer) {
-          // Photo buffer ጋር
-          const boundary = '----FormBoundary' + Date.now();
-          const body = Buffer.concat([
-            Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${uid}\r\n`),
-            Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${text || ''}\r\n`),
-            Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="parse_mode"\r\n\r\nHTML\r\n`),
-            Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="promo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
-            photoBuffer,
-            Buffer.from(`\r\n--${boundary}--\r\n`)
-          ]);
-          await new Promise((resolve) => {
-            const opts = {
-              hostname: 'api.telegram.org',
-              path: `/bot${BOT_TOKEN}/sendPhoto`,
-              method: 'POST',
-              headers: {
-                'Content-Type': `multipart/form-data; boundary=${boundary}`,
-                'Content-Length': body.length
-              }
-            };
-            const r2 = https.request(opts, (r) => { r.on('data', ()=>{}); r.on('end', resolve); });
-            r2.on('error', resolve);
-            r2.write(body); r2.end();
-          });
-        } else if (photoUrl) {
-          // Cloudinary photo URL ጋር
-          const bodyData = JSON.stringify({
-            chat_id: uid,
-            photo: photoUrl,
-            caption: text || '',
-            parse_mode: 'HTML'
-          });
-          await new Promise((resolve) => {
-            const opts = {
-              hostname: 'api.telegram.org',
-              path: `/bot${BOT_TOKEN}/sendPhoto`,
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(bodyData)
-              }
-            };
-            const r2 = https.request(opts, (r) => { r.on('data', ()=>{}); r.on('end', resolve); });
-            r2.on('error', resolve);
-            r2.write(bodyData); r2.end();
-          });
-        } else {
-          // Text ብቻ
-          const bodyData = JSON.stringify({
-            chat_id: uid,
-            text: text || '',
-            parse_mode: 'HTML'
-          });
-          await new Promise((resolve) => {
-            const opts = {
-              hostname: 'api.telegram.org',
-              path: `/bot${BOT_TOKEN}/sendMessage`,
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(bodyData)
-              }
-            };
-            const r2 = https.request(opts, (r) => { r.on('data', ()=>{}); r.on('end', resolve); });
-            r2.on('error', resolve);
-            r2.write(bodyData); r2.end();
-          });
-        }
-        // Rate limit ለማስቀረት 50ms delay
-        await new Promise(r => setTimeout(r, 50));
-      } catch(e) {
-        console.error(`❌ Promo to ${uid}:`, e.message);
-      }
-    }
-    console.log(`✅ Promotion sent to ${uids.length} users`);
-  } catch(e) { console.error('❌ broadcastPromotion error:', e.message); }
+    const ep = autoOn ? '/admin/auto-stop' : '/admin/auto-start';
+    const r = await fetch(`${BASE}${ep}`, { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' });
+    const d = await r.json();
+    if (d.ok) { autoOn = !autoOn; updateAutoUI(autoOn); showToast(d.msg || (autoOn ? '✅ Auto started!' : '✅ Auto stopped!'), 'success'); }
+    else showToast('❌ ' + (d.msg || 'Error'), 'error');
+  } catch(e) { showToast('❌ Connection error', 'error'); }
+  btn.style.opacity = '1'; btn.style.pointerEvents = 'auto';
 }
 
-async function checkPromotions() {
+function toggleCollapse() {
+  collapsed = !collapsed;
+  document.getElementById('collapseBody').classList.toggle('collapsed', collapsed);
+  document.getElementById('collapseBtn').classList.toggle('collapsed', collapsed);
+}
+
+function updateBotUI(on) {
+  document.getElementById('botDot').classList.toggle('off', !on);
+  document.getElementById('botTitle').textContent = on ? 'SMART BOT — RUNNING' : 'SMART BOT — OFF';
+  document.getElementById('botTitle').style.color = on ? 'var(--purple)' : 'var(--muted)';
+  document.getElementById('botBtn').style.background = on ? 'linear-gradient(135deg,#e53935,#b71c1c)' : 'linear-gradient(135deg,#7b1fa2,#4a148c)';
+  document.getElementById('botBtnIcon').textContent = on ? '⏹' : '▶';
+  document.getElementById('botBtnText').textContent = on ? 'DISABLE SMART BOT' : 'ENABLE SMART BOT';
+}
+let wdEnabled = true;
+
+async function fetchWithdrawalStatus() {
   try {
-    const promos = (await pool.query('SELECT * FROM promotions WHERE active=true')).rows;
-    const now = Date.now();
-    for (const p of promos) {
-      if (!p.next_send_at) continue;
-      if (now < Number(p.next_send_at)) continue;
-      console.log(`📢 Sending interval promotion id=${p.id}`);
-      try {
-        await broadcastPromotion({
-          text: p.text || '',
-          photoBuffer: null,
-          photoUrl: p.photo_url || '',
-          targetType: p.target_type || 'bot',
-          groupId: p.group_id || ''
-        });
-        await pool.query(
-          'UPDATE promotions SET next_send_at=$1, last_sent_at=$2 WHERE id=$3',
-          [now + (p.interval_ms || 3600000), now, p.id]
-        );
-        console.log(`✅ Promotion sent! id=${p.id}`);
-      } catch(e) {
-        console.error('❌ Promotion send error:', e.message);
-        await pool.query(
-          'UPDATE promotions SET next_send_at=$1 WHERE id=$2',
-          [now + (p.interval_ms || 3600000), p.id]
-        );
-      }
-    }
-  } catch(e) {
-    console.error('❌ checkPromotions error:', e.message);
-  }
+    const r = await fetch(`${BASE}/withdrawal-status`);
+    const d = await r.json();
+    wdEnabled = d.enabled;
+    updateWdUI(wdEnabled);
+  } catch(e) {}
 }
 
-setInterval(checkPromotions, 60 * 1000);
-console.log('📢 Promotion interval scheduler started');
+function updateWdUI(enabled) {
+  document.getElementById('wdDot').classList.toggle('off', !enabled);
+  document.getElementById('wdTitle').textContent = enabled ? 'WITHDRAWAL — OPEN' : 'WITHDRAWAL — CLOSED';
+  document.getElementById('wdTitle').style.color = enabled ? 'var(--green)' : 'var(--red)';
+  document.getElementById('wdBtn').className = 'main-btn ' + (enabled ? 'btn-stop' : 'btn-start');
+  document.getElementById('wdBtnIcon').textContent = enabled ? '⏹' : '▶';
+  document.getElementById('wdBtnText').textContent = enabled ? 'CLOSE WITHDRAWAL' : 'OPEN WITHDRAWAL';
+}
 
-app.post('/confirm-card', async (req, res) => {
-  const { userId, cardId } = req.body;
-  if (!userId || !cardId) return res.json({ ok: false, msg: 'Missing data' });
+async function toggleWithdrawal() {
+  const btn = document.getElementById('wdBtn');
+  btn.style.opacity = '0.6'; btn.style.pointerEvents = 'none';
   try {
-    const bet = (await getState('game/bet')) || 0;
-    const balRes = await pool.query('SELECT balance FROM users WHERE uid=$1', [userId]);
-    const bal = balRes.rows.length ? Number(balRes.rows[0].balance) : 0;
-    if (bal < bet) return res.json({ ok: false, msg: '❌ Balance አንስተኛ ነው!' });
-
-    const status = await getState('game/status');
-    if (status?.started) return res.json({ ok: false, msg: '❌ Game ጀምሯል!' });
-
-    const allCards = (await getState('game/confirmedNumbers')) || {};
-    const myCards = Object.values(allCards).filter(v => String(v) === String(userId));
-    if (myCards.length >= 10) return res.json({ ok: false, msg: '❌ ከ 10 ካርድ በላይ መያዝ አይቻልም!' });
-    if (allCards[cardId]) return res.json({ ok: false, msg: '❌ Card ተይዟል!' });
-
-    allCards[cardId] = userId;
-    await setState('game/confirmedNumbers', allCards);
-    await pool.query('UPDATE users SET balance = balance - $1 WHERE uid=$2', [bet, userId]);
-
-    const total = Object.keys(allCards).length;
-    const pct = (await getState('game/percent')) || 80;
-    const prize = Math.floor(bet * total * (pct / 100));
-    await setState('game/prize', prize);
-    await setState('game/total', bet * total);
-
-    await updateAnalytics('totalCollected', bet);
-
-    const currentBet = await getState('game/bet');
-    const allC = (await getState('game/confirmedNumbers')) || {};
-    const totalCards = Object.keys(allC).length;
-    const totalPlayers = new Set(Object.values(allC)).size;
-    broadcast({ type: 'card_taken', cardId, userId, prize, bet: currentBet, totalCards, totalPlayers });
-
-    return res.json({ ok: true, msg: '✅ Card confirmed!' });
-  } catch(e) { return res.json({ ok: false, msg: 'Error: ' + e.message }); }
-});
-
-// ══ STATE ══
-let autoModeOn = false;
-let autoCdMinutes = 3;
-let calledNumbers = [];
-let callTimer = null;
-let countdownTimer = null;
-let announceTimer = null;
-let roundNumber = 1;
-let gamePct = 80;
-
-console.log('🚀 Bingo Server Started!');
-
-function getLetter(n) {
-  if (n <= 15) return 'B';
-  if (n <= 30) return 'I';
-  if (n <= 45) return 'N';
-  if (n <= 60) return 'G';
-  return 'O';
-}
-
-function generateBoard(seed) {
-  function sr(s) { let x = Math.sin(s) * 10000; return x - Math.floor(x); }
-  function getNums(min, max, s) {
-    let arr = [], k = s;
-    while (arr.length < 5) {
-      let n = Math.floor(sr(k++) * (max - min + 1)) + min;
-      if (!arr.includes(n)) arr.push(n);
-    }
-    return arr;
-  }
-  let B = getNums(1,15,seed+1), I = getNums(16,30,seed+2),
-      N = getNums(31,45,seed+3), G = getNums(46,60,seed+4),
-      O = getNums(61,75,seed+5);
-  let b = [];
-  for (let i = 0; i < 5; i++) b.push(B[i], I[i], N[i], G[i], O[i]);
-  b[12] = 'FREE';
-  return b;
-}
-
-function checkWin(board, called) {
-  const g = [];
-  for (let i = 0; i < 5; i++) g.push(board.slice(i * 5, (i + 1) * 5));
-  for (let r = 0; r < 5; r++)
-    if (g[r].every(n => n === 'FREE' || called.includes(n))) return true;
-  for (let c = 0; c < 5; c++)
-    if ([0,1,2,3,4].every(r => g[r][c] === 'FREE' || called.includes(g[r][c]))) return true;
-  if ([0,1,2,3,4].every(i => g[i][i] === 'FREE' || called.includes(g[i][i]))) return true;
-  if ([0,1,2,3,4].every(i => g[i][4-i] === 'FREE' || called.includes(g[i][4-i]))) return true;
-  return false;
-}
-
-function wouldCloseColumnSoon(n, allBoards, called) {
-  const colIndices = [
-    [0,5,10,15,20], [1,6,11,16,21], [2,7,12,17,22],
-    [3,8,13,18,23], [4,9,14,19,24],
-  ];
-  const simulatedCalled = [...called, n];
-  for (let cardId in allBoards) {
-    const board = allBoards[cardId];
-    for (let col of colIndices) {
-      const cells = col.map(i => board[i]);
-      const matched = cells.filter(c => c === 'FREE' || simulatedCalled.includes(c)).length;
-      if (matched === 4) return true;
-    }
-  }
-  return false;
-}
-
-function clearAllTimers() {
-  clearInterval(callTimer); callTimer = null;
-  clearInterval(countdownTimer); countdownTimer = null;
-  clearInterval(announceTimer); announceTimer = null;
-}
-
-setInterval(async () => {
-  try {
-    const val = await getState('autoMode/on');
-    if (val === true && !autoModeOn) {
-      autoModeOn = true;
-      console.log('✅ Auto Mode ON');
-      autoCdMinutes = (await getState('autoMode/cdMinutes')) || 3;
-      roundNumber = (await getState('autoMode/round')) || 1;
-      startAutoCountdown();
-    } else if (!val && autoModeOn) {
-      autoModeOn = false;
-      clearAllTimers();
-      await setState('autoMode/phase', 'idle');
-      console.log('⏹ Auto Mode OFF');
-    }
-  } catch(e) { console.error('❌ autoMode poll error:', e.message); }
-}, 3000);
-
-async function startAutoCountdown() {
-  if (!autoModeOn) return;
-  clearAllTimers();
-  const secs = autoCdMinutes * 60;
-  const startAt = Date.now() + secs * 1000;
-  await setState('game/countdown', { active: true, startAt, mins: autoCdMinutes, autoStart: true });
-  await setState('autoMode/phase', 'countdown');
-  console.log(`⏱ Countdown: ${autoCdMinutes} min`);
-  let remain = secs;
-  countdownTimer = setInterval(async () => {
-    if (!autoModeOn) { clearInterval(countdownTimer); return; }
-    remain--;
-    if (remain <= 0) { clearInterval(countdownTimer); await startAutoGame(); }
-  }, 1000);
-}
-
-async function startAutoGame() {
-  if (!autoModeOn) return;
-  try {
-    calledNumbers = [];
-    await setState('game/countdown', { active: false });
-    await setState('game/calledNumbers', []);
-    await setState('game/pendingWinner', null);
-    await setState('game/winners', null);
-    await setState('game/paid', false);
-    await setState('game/status', { started: true, autoStarted: true });
-    await setState('autoMode/phase', 'playing');
-    console.log('🎮 Game Started!');
-
-    const callSpeed = (await getState('autoMode/callSpeed')) || 6000;
-    await addBotsIfNeeded();
-
-    setTimeout(() => { autoCallNumber(callSpeed); }, 2000);
-  } catch(e) {
-    console.error('❌ startAutoGame error:', e.message);
-    setTimeout(() => { if (autoModeOn) startAutoCountdown(); }, 10000);
-  }
-}
-
-async function addBotsIfNeeded() {
-  try {
-    const enabled = await getState('smartBot/enabled');
-    if (!enabled) return;
-
-    const minCards = (await getState('smartBot/minCards')) || 5;
-    const allCards = (await getState('game/confirmedNumbers')) || {};
-    const realPlayerCount = Object.keys(allCards).length;
-    const botsNeeded = Math.max(0, minCards - realPlayerCount);
-    if (botsNeeded === 0) return;
-
-    const bet = (await getState('game/bet')) || 0;
-    const pct = (await getState('game/percent')) || 80;
-
-    for (let i = 0; i < botsNeeded; i++) {
-      const botId = `bot_${Date.now()}_${i}`;
-      const botName = `Bot${Math.floor(Math.random() * 9000) + 1000}`;
-      await pool.query(
-        'INSERT INTO users(uid,display,balance,is_bot) VALUES($1,$2,$3,true) ON CONFLICT(uid) DO UPDATE SET display=$2',
-        [botId, botName, bet * 10]
-      );
-      const cardId = String(Math.floor(Math.random() * 900000) + 100000);
-      if (!allCards[cardId]) {
-        allCards[cardId] = botId;
-        await pool.query('UPDATE users SET balance = balance - $1 WHERE uid=$2', [bet, botId]);
-      }
-    }
-
-    await setState('game/confirmedNumbers', allCards);
-    const total = Object.keys(allCards).length;
-    const newTotal = bet * total;
-    const newPrize = Math.floor(newTotal * (pct / 100));
-    await setState('game/prize', newPrize);
-    await setState('game/total', newTotal);
-    await updateAnalytics('botBet', bet * botsNeeded);
-    console.log(`🤖 Added ${botsNeeded} bots. Total cards: ${total}, prize: ${newPrize}`);
-  } catch(e) { console.error('❌ addBotsIfNeeded error:', e.message); }
-}
-
-async function autoCallNumber(speed) {
-  if (!autoModeOn) return;
-  clearInterval(callTimer);
-
-  const allCards = (await getState('game/confirmedNumbers')) || {};
-  console.log(`📋 Cards at game start: ${Object.keys(allCards).length}`);
-
-  if (Object.keys(allCards).length === 0) {
-    console.log('⚠️ No cards found! Skipping to next round...');
-    await scheduleNextRound();
-    return;
-  }
-
-  const usersSnap = await pool.query('SELECT uid, display, is_bot FROM users');
-  const allUsers = {};
-  usersSnap.rows.forEach(r => { allUsers[r.uid] = { display: r.display, is_bot: r.is_bot }; });
-
-  const cardInfoMap = {}, realCards = [], botCards = [];
-  for (let cardId in allCards) {
-    const uid = allCards[cardId];
-    const isBot = allUsers[uid]?.is_bot === true;
-    const name = allUsers[uid]?.display || String(uid);
-    const entry = { user: uid, displayName: name, cardId, isBot };
-    cardInfoMap[cardId] = entry;
-    if (isBot) botCards.push(entry);
-    else realCards.push(entry);
-  }
-
-  console.log(`🎮 Real cards: ${realCards.length}, Bot cards: ${botCards.length}`);
-
-  const bet = (await getState('game/bet')) || 0;
-  gamePct = (await getState('game/percent')) || 80;
-  const realBetsTotal = bet * realCards.length;
-  const botBetsTotal  = bet * botCards.length;
-
-  const totalCards = Object.keys(allCards).length;
-  const prize = Math.floor(bet * totalCards * (gamePct / 100));
-  await setState('game/prize', prize);
-
-  const botWinPercent = (await getState('autoMode/botWinPercent')) ?? 50;
-  const roll = Math.floor(Math.random() * 100) + 1;
-  let targetCard = null;
-  if (roll <= botWinPercent) {
-    targetCard = botCards.length > 0
-      ? botCards[Math.floor(Math.random() * botCards.length)]
-      : realCards.length > 0 ? realCards[Math.floor(Math.random() * realCards.length)] : null;
-  } else {
-    targetCard = realCards.length > 0
-      ? realCards[Math.floor(Math.random() * realCards.length)]
-      : botCards.length > 0 ? botCards[Math.floor(Math.random() * botCards.length)] : null;
-  }
-
-  if (!targetCard) {
-    console.log('⚠️ No target card — scheduling next round');
-    await scheduleNextRound();
-    return;
-  }
-
-  const neededNums = generateBoard(Number(targetCard.cardId)).filter(n => n !== 'FREE');
-  const allBoards = {};
-  for (let cardId in cardInfoMap) allBoards[cardId] = generateBoard(Number(cardId));
-
-  callTimer = setInterval(async () => {
-    try {
-      if (!autoModeOn) { clearInterval(callTimer); return; }
-
-      const pend = await getState('game/pendingWinner');
-      if (pend && !pend.announced) {
-        clearInterval(callTimer);
-        startAutoAnnounce(realBetsTotal, botBetsTotal);
-        return;
-      }
-
-      const used = new Set(calledNumbers);
-      const remaining = [...Array(75)].map((_, i) => i + 1).filter(n => !used.has(n));
-
-      if (!remaining.length) {
-        clearInterval(callTimer);
-        for (let cardId in allCards) {
-          const uid = allCards[cardId];
-          if (allUsers[uid]?.is_bot) continue;
-          await pool.query('UPDATE users SET balance = balance + $1 WHERE uid=$2', [bet, uid]);
-          const r = await pool.query('SELECT balance FROM users WHERE uid=$1', [uid]);
-          broadcast({ type: 'balance', uid, balance: r.rows[0]?.balance || 0 });
-          await pool.query(
-            'INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
-            [uid, `⚠️ Game ሳይጠናቀቅ ተዘጋ — ${bet} ብር ተመለሰ!`, Date.now()]
-          );
-        }
-        await setState('game/announcement', { type: 'no_winner', message: 'ምንም አሸናፊ አልተገኘም', time: Date.now() });
-        await scheduleNextRound();
-        return;
-      }
-
-      const neededRemaining = remaining.filter(n => neededNums.includes(n) && !calledNumbers.includes(n));
-      let safeRemaining = remaining.filter(n => !wouldCloseColumnSoon(n, allBoards, calledNumbers));
-      if (safeRemaining.length === 0) safeRemaining = remaining;
-      const safeNeeded = neededRemaining.filter(n => safeRemaining.includes(n));
-
-      let n;
-      const noBotBias = (await getState('autoMode/noBotBias')) ?? 0.50;
-      const rand = Math.random();
-      if (safeNeeded.length > 0 && rand < noBotBias)
-        n = safeNeeded[Math.floor(Math.random() * safeNeeded.length)];
-      else if (safeRemaining.length > 0)
-        n = safeRemaining[Math.floor(Math.random() * safeRemaining.length)];
-      else
-        n = remaining[Math.floor(Math.random() * remaining.length)];
-
-      calledNumbers.push(n);
-      const called = (await getState('game/calledNumbers')) || [];
-      called.push(n);
-      await setState('game/calledNumbers', called);
-      console.log(`📢 ${getLetter(n)}${n}`);
-
-      const winners = [];
-      for (let cardId in allBoards)
-        if (checkWin(allBoards[cardId], calledNumbers))
-          winners.push({ ...cardInfoMap[cardId], time: Date.now() });
-
-      if (winners.length > 0) {
-        clearInterval(callTimer);
-        console.log(`🏆 Winner found after ${calledNumbers.length} calls`);
-        await setState('game/pendingWinner', { winners, prize, announced: false, time: Date.now() });
-        startAutoAnnounce(realBetsTotal, botBetsTotal);
-      }
-    } catch(e) { console.error('❌ callNumber error:', e.message); }
-  }, speed);
-}
-
-async function startAutoAnnounce(realBetsTotal, botBetsTotal) {
-  if (!autoModeOn) return;
-  clearAllTimers();
-  await setState('autoMode/phase', 'announcing');
-  console.log('🎉 Winner found! Announcing in 5 seconds...');
-  let count = 5;
-  announceTimer = setInterval(async () => {
-    count--;
-    console.log(`⏳ Announcing in ${count}s...`);
-    if (count <= 0) {
-      clearInterval(announceTimer);
-      announceTimer = null;
-      await announceWinner(realBetsTotal, botBetsTotal);
-      await scheduleNextRound();
-    }
-  }, 1000);
-}
-
-async function announceWinner(realBetsTotal, botBetsTotal) {
-  try {
-    const data = await getState('game/pendingWinner');
-    if (!data) return;
-    const { winners, prize } = data;
-    const share = Math.floor(prize / winners.length);
-
-    let realWinShare = 0;
-    let botWinShare = 0;
-    let botWon = false;
-
-    for (let w of winners) {
-      if (w.isBot) {
-        botWon = true;
-        botWinShare += share;
-      } else {
-        realWinShare += share;
-        await pool.query('UPDATE users SET balance = balance + $1 WHERE uid=$2', [share, w.user]);
-        const r = await pool.query('SELECT balance FROM users WHERE uid=$1', [w.user]);
-        broadcast({ type: 'balance', uid: w.user, balance: r.rows[0]?.balance || 0 });
-        await pool.query(
-          'INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
-          [w.user, `🎉 አሸነፍክ! ${share} ብር balance ላይ ታከለ! Card #${w.cardId}`, Date.now()]
-        );
-      }
-    }
-
-    const winnersObj = {};
-    winners.forEach((w, i) => { winnersObj[i] = { ...w, prize: share }; });
-    await setState('game/winners', winnersObj);
-
-    for (const w of winners) {
-      await pool.query(
-        'INSERT INTO all_winners(uid,display_name,card_id,prize,is_bot,time) VALUES($1,$2,$3,$4,$5,$6)',
-        [w.user, w.displayName, w.cardId, share, w.isBot || false, Date.now()]
-      );
-    }
-
-    const winnerPayload = {
-      type: 'winner',
-      winners,
-      prize,
-      share,
-      calledNumbers,
-      time: Date.now()
-    };
-    broadcast(winnerPayload);
-
-    broadcast({
-      type: 'winner_popup',
-      winners: winners.filter(w => !w.isBot),
-      share,
-      prize,
-      calledNumbers,
-      time: Date.now()
+    const r = await fetch(`${BASE}/withdrawal-toggle`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: !wdEnabled })
     });
-
-    await setState('game/announcement', { type: 'winner', winners, prize, share, time: Date.now(), calledNumbers });
-    await setState('game/paid', true);
-    await setState('game/pendingWinner', { ...data, announced: true });
-
-    setTimeout(async () => {
-      await setState('game/status', { started: false, waitingRestart: true });
-    }, 6000);
-
-    await updateAnalytics('totalPaidOut', realWinShare);
-    if (botWon) await updateAnalytics('botWinProfit', botWinShare);
-
-    const roundProfit = realBetsTotal - realWinShare - botBetsTotal;
-    await updateAnalytics('totalProfit', roundProfit);
-
-    const todayStr = new Date().toISOString().split('T')[0];
-    const history = (await getState('analytics/history')) || [];
-    const todayIdx = history.findIndex(h => h.date === todayStr);
-    if (todayIdx >= 0) {
-      history[todayIdx].profit = (history[todayIdx].profit || 0) + roundProfit;
-      history[todayIdx].rounds = (history[todayIdx].rounds || 0) + 1;
-      if (botWon) history[todayIdx].botWins = (history[todayIdx].botWins || 0) + 1;
-      else history[todayIdx].playerWins = (history[todayIdx].playerWins || 0) + 1;
-    } else {
-      history.push({
-        date: todayStr,
-        profit: roundProfit,
-        rounds: 1,
-        botWins: botWon ? 1 : 0,
-        playerWins: botWon ? 0 : 1
-      });
+    const d = await r.json();
+    if (d.ok) {
+      wdEnabled = d.enabled;
+      updateWdUI(wdEnabled);
+      showToast(wdEnabled ? '✅ Withdrawal OPEN!' : '🔒 Withdrawal CLOSED!', wdEnabled ? 'success' : 'error');
     }
-    await setState('analytics/history', history.slice(-5));
-
-    console.log(`✅ Round done! realBets:${realBetsTotal} botBets:${botBetsTotal} paidOut:${realWinShare} profit:${roundProfit} botWon:${botWon}`);
-  } catch(e) { console.error('❌ announceWinner error:', e.message); }
+  } catch(e) { showToast('❌ Connection error', 'error'); }
+  btn.style.opacity = '1'; btn.style.pointerEvents = 'auto';
 }
-
-async function scheduleNextRound() {
-  if (!autoModeOn) return;
+async function saveBotSettings() {
+  const botWinPercent = document.getElementById('botWinPct').value;
+  const gameBias = document.getElementById('gameBias').value;
   try {
-    const todayStr = new Date().toISOString().split('T')[0];
-    const lastReset = await getState('analytics/lastResetDate');
-    if (lastReset !== todayStr) {
-      await setState('analytics/lastResetDate', todayStr);
-      roundNumber = 1;
-      await setState('autoMode/round', roundNumber);
-      console.log('🔄 Daily Reset:', todayStr);
-    }
-
-    roundNumber++;
-    await setState('autoMode/round', roundNumber);
-    await setState('game/calledNumbers', []);
-    await setState('game/status', { started: false });
-    await setState('game/winners', null);
-
-    setTimeout(async () => {
-      await setState('game/pendingWinner', null);
-      await setState('game/announcement', null);
-    }, 10000);
-
-    await setState('game/paid', false);
-    await setState('game/confirmedNumbers', {});
-    await setState('game/prize', 0);
-    await setState('game/total', 0);
-    calledNumbers = [];
-
-    await pool.query('DELETE FROM users WHERE is_bot = true');
-
-    await setState('autoMode/phase', 'countdown');
-    setTimeout(async () => { if (autoModeOn) await startAutoCountdown(); }, 3000);
-  } catch(e) {
-    console.error('❌ scheduleNextRound error:', e.message);
-    setTimeout(() => { if (autoModeOn) startAutoCountdown(); }, 15000);
-  }
-}
-
-setTimeout(async () => {
-  try {
-    const autoOn = await getState('autoMode/on');
-    if (autoOn === true) {
-      console.log('🔄 Restoring auto mode after restart...');
-      autoModeOn = true;
-      autoCdMinutes = (await getState('autoMode/cdMinutes')) || 3;
-      roundNumber = (await getState('autoMode/round')) || 1;
-      gamePct = (await getState('game/percent')) || 80;
-      const gameStatus = await getState('game/status');
-      if (gameStatus?.started) {
-        await scheduleNextRound();
-      } else {
-        await startAutoCountdown();
-      }
-    }
-  } catch(e) { console.error('❌ Restore error:', e.message); }
-}, 3000);
-
-setInterval(async () => {
-  try {
-    await pool.query('DELETE FROM notifications WHERE time < $1', [Date.now() - (7 * 24 * 60 * 60 * 1000)]);
-    await pool.query(`DELETE FROM all_winners WHERE id NOT IN (SELECT id FROM all_winners ORDER BY time DESC LIMIT 500)`);
-    await pool.query('DELETE FROM promotions WHERE active=false AND created_at < $1', [Date.now() - (30 * 24 * 60 * 60 * 1000)]);
-
-    const lastReset = (await getState('analytics/lastFullReset')) || 0;
-    const fiveDays = 5 * 24 * 60 * 60 * 1000;
-    if (Date.now() - lastReset >= fiveDays) {
-      await pool.query('DELETE FROM analytics');
-      await setState('analytics/history', []);
-      await setState('analytics/lastFullReset', Date.now());
-      console.log('🔄 Analytics full reset (5 days)');
-    }
-
-    console.log('✅ Auto cleanup done');
-  } catch(e) { console.error('Cleanup error:', e.message); }
-}, 24 * 60 * 60 * 1000);
-
-// ══ ADMIN CONTROL ENDPOINTS ══
-app.post('/admin/auto-start', async (req, res) => {
-  try {
-    await setState('autoMode/on', true);
-    autoModeOn = true;
-    autoCdMinutes = (await getState('autoMode/cdMinutes')) || 3;
-    roundNumber = (await getState('autoMode/round')) || 1;
-    startAutoCountdown();
-    res.json({ ok: true, msg: '✅ Auto mode started!' });
-  } catch(e) { res.json({ ok: false, msg: e.message }); }
-});
-
-app.post('/admin/auto-stop', async (req, res) => {
-  try {
-    await setState('autoMode/on', false);
-    autoModeOn = false;
-    clearAllTimers();
-    await setState('autoMode/phase', 'idle');
-    await setState('game/countdown', { active: false });
-    res.json({ ok: true, msg: '✅ Auto mode stopped!' });
-  } catch(e) { res.json({ ok: false, msg: e.message }); }
-});
-
-app.post('/admin/set-settings', async (req, res) => {
-  try {
-    const { bet, percent, cdMinutes, callSpeed, botWinPercent, botMinCards, noBotBias } = req.body;
-    if (bet !== undefined) await setState('game/bet', Number(bet));
-    if (percent !== undefined) {
-      await setState('game/percent', Number(percent));
-      gamePct = Number(percent);
-    }
-    if (cdMinutes !== undefined) await setState('autoMode/cdMinutes', Number(cdMinutes));
-    if (callSpeed !== undefined) await setState('autoMode/callSpeed', Number(callSpeed));
-    if (botWinPercent !== undefined) await setState('autoMode/botWinPercent', Number(botWinPercent));
-    if (botMinCards !== undefined) await setState('smartBot/minCards', Number(botMinCards));
-    if (noBotBias !== undefined) await setState('autoMode/noBotBias', Number(noBotBias));
-    res.json({ ok: true, msg: '✅ Settings saved!' });
-  } catch(e) { res.json({ ok: false, msg: e.message }); }
-});
-
-app.post('/set-state', async (req, res) => {
-  try {
-    const { key, value } = req.body;
-    await setState(key, value);
-    res.json({ ok: true });
-  } catch(e) { res.json({ ok: false, msg: e.message }); }
-});
-
-app.post('/start-auto', async (req, res) => {
-  try {
-    const { cdMinutes, callSpeed } = req.body;
-    if (cdMinutes) await setState('autoMode/cdMinutes', Number(cdMinutes));
-    if (callSpeed) await setState('autoMode/callSpeed', Number(callSpeed));
-    await setState('autoMode/on', true);
-    autoModeOn = true;
-    autoCdMinutes = cdMinutes || autoCdMinutes;
-    startAutoCountdown();
-    res.json({ ok: true, msg: '✅ Auto started!' });
-  } catch(e) { res.json({ ok: false, msg: e.message }); }
-});
-
-// ══ AGENT ENDPOINTS ══
-app.post('/withdrawal-accept', async (req, res) => {
-  try {
-    const { key, agentId } = req.body;
-    if (!key || !agentId) return res.json({ ok: false, msg: 'Missing data' });
-    const allWd = JSON.parse(
-      (await pool.query("SELECT value FROM game_state WHERE key='bot/withdrawals'")).rows[0]?.value || '{}'
-    );
-    if (!allWd[key]) return res.json({ ok: false, msg: 'Not found' });
-    const now = Date.now();
-    const LOCK_MS = 3 * 60 * 1000;
-    if (allWd[key].status === 'accepted' && allWd[key].acceptedBy !== agentId && now - (allWd[key].acceptedAt || 0) < LOCK_MS) {
-      return res.json({ ok: false, msg: '⚠️ ሌላ Agent ወስዷል!' });
-    }
-    const myActive = Object.entries(allWd).find(
-      ([k, v]) => v.status === 'accepted' && v.acceptedBy === agentId && k !== key
-    );
-    if (myActive) return res.json({ ok: false, msg: '⚠️ አሁን ያለህን Request አጠናቅ!' });
-    allWd[key].status = 'accepted';
-    allWd[key].acceptedBy = agentId;
-    allWd[key].acceptedAt = now;
-    await setState('bot/withdrawals', allWd);
-    res.json({ ok: true, msg: '✅ Request ተቀበልክ! 3 ደቂቃ አለህ.' });
-  } catch(e) { res.json({ ok: false, msg: e.message }); }
-});
-
-app.post('/withdrawal-release', async (req, res) => {
-  try {
-    const { key, agentId } = req.body;
-    if (!key || !agentId) return res.json({ ok: false, msg: 'Missing data' });
-    const allWd = JSON.parse(
-      (await pool.query("SELECT value FROM game_state WHERE key='bot/withdrawals'")).rows[0]?.value || '{}'
-    );
-    if (!allWd[key]) return res.json({ ok: false, msg: 'Not found' });
-    if (allWd[key].acceptedBy !== agentId) return res.json({ ok: false, msg: '❌ ይህ request ያንተ አይደለም!' });
-    allWd[key].status = 'pending';
-    allWd[key].acceptedBy = null;
-    allWd[key].acceptedAt = null;
-    await setState('bot/withdrawals', allWd);
-    res.json({ ok: true, msg: '↩ Request ለሌላ Agent ተለቀቀ!' });
-  } catch(e) { res.json({ ok: false, msg: e.message }); }
-});
-
-app.post(
-  '/withdrawal-paid',
-  multer({ storage: multer.memoryStorage() }).single('photo'),
-  async (req, res) => {
-    try {
-      const { key, agentId } = req.body;
-      const file = req.file;
-      if (!key || !agentId) return res.json({ ok: false, msg: 'Missing data' });
-      const allWd = JSON.parse(
-        (await pool.query("SELECT value FROM game_state WHERE key='bot/withdrawals'")).rows[0]?.value || '{}'
-      );
-      const wd = allWd[key];
-      if (!wd) return res.json({ ok: false, msg: 'Not found' });
-      if (wd.acceptedBy !== agentId) return res.json({ ok: false, msg: '❌ ይህ request ያንተ አይደለም!' });
-
-      const uid = String(wd.user_id);
-      const amount = wd.amount || 0;
-      const method = wd.method || 'ባንክ';
-      const account = wd.account || '—';
-      const BOT_TOKEN = process.env.BOT_TOKEN || '';
-
-      if (file && BOT_TOKEN) {
-        try {
-          const boundary = '----FormBoundary' + Date.now();
-          const caption = `✅ ${amount} ብር በ ${method} ተላከ!\n📋 Account: ${account}`;
-          const body = Buffer.concat([
-            Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${uid}\r\n`),
-            Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption}\r\n`),
-            Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="screenshot.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
-            file.buffer,
-            Buffer.from(`\r\n--${boundary}--\r\n`),
-          ]);
-          await new Promise((resolve) => {
-            const opts = {
-              hostname: 'api.telegram.org',
-              path: `/bot${BOT_TOKEN}/sendPhoto`,
-              method: 'POST',
-              headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length }
-            };
-            const r2 = require('https').request(opts, (r) => { let d=''; r.on('data',c=>d+=c); r.on('end',()=>{console.log('📸 TG photo:',d.slice(0,80));resolve();}); });
-            r2.on('error', () => resolve());
-            r2.write(body); r2.end();
-          });
-        } catch(e) { console.error('❌ TG photo error:', e.message); }
-      }
-
-      allWd[key].status = 'approved';
-      await setState('bot/withdrawals', allWd);
-      await updateAnalytics('totalWithdrawals', amount);
-      await pool.query(
-        'INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
-        [uid, `✅ ${amount} ብር በ ${method} ተላከ!`, Date.now()]
-      );
-      broadcast({ type: 'withdrawal_approved', key, uid, amount });
-      res.json({ ok: true });
-    } catch(e) { res.json({ ok: false, msg: e.message }); }
-  }
-);
-
-app.post('/agent-verify', async (req, res) => {
-  try {
-    const { name, idNumber, password } = req.body;
-    const agents = JSON.parse(
-      (await pool.query("SELECT value FROM game_state WHERE key='agents'")).rows[0]?.value || '{}'
-    );
-    const agent = agents[name];
-    if (!agent) return res.json({ ok: false, msg: '❌ Agent አልተመዘገበም!' });
-    if (String(agent.id_number) !== String(idNumber))
-      return res.json({ ok: false, msg: '❌ የግል ቁጥር ትክክል አይደለም!' });
-    const agentPass =
-      (await pool.query("SELECT value FROM game_state WHERE key='settings/agent_password'")).rows[0]?.value?.replace(/"/g, '') || 'agent2025';
-    if (password !== agentPass)
-      return res.json({ ok: false, msg: '❌ Password ትክክል አይደለም!' });
-    res.json({ ok: true, agentName: name });
-  } catch(e) { res.json({ ok: false, msg: e.message }); }
-});
-
-// ══ DB ENDPOINTS ══
-app.get('/db-get', async (req, res) => {
-  try {
-    const { path } = req.query;
-    if (!path) return res.json(null);
-    const r = await pool.query('SELECT value FROM game_state WHERE key=$1', [path]);
-    if (!r.rows.length) return res.json(null);
-    try { return res.json(JSON.parse(r.rows[0].value)); }
-    catch { return res.json(r.rows[0].value); }
-  } catch(e) { res.json(null); }
-});
-
-app.post('/db-set', async (req, res) => {
-  try {
-    const { path, value } = req.body;
-    if (!path) return res.json({ ok: false });
-    if (value === null || value === undefined) {
-      await pool.query('DELETE FROM game_state WHERE key=$1', [path]);
-    } else {
-      await pool.query(
-        'INSERT INTO game_state(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2',
-        [path, JSON.stringify(value)]
-      );
-    }
-    res.json({ ok: true });
-  } catch(e) { res.json({ ok: false, msg: e.message }); }
-});
-
-app.post('/db-push', async (req, res) => {
-  try {
-    const { path, value } = req.body;
-    if (!path) return res.json({ ok: false });
-    const r = await pool.query('SELECT value FROM game_state WHERE key=$1', [path]);
-    let existing = {};
-    if (r.rows.length) {
-      try { existing = JSON.parse(r.rows[0].value); } catch { existing = {}; }
-    }
-    const key = String(Date.now()) + Math.random().toString(36).slice(2,6);
-    existing[key] = value;
-    await pool.query(
-      'INSERT INTO game_state(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2',
-      [path, JSON.stringify(existing)]
-    );
-    res.json({ ok: true, key });
-  } catch(e) { res.json({ ok: false, msg: e.message }); }
-});
-
-app.get('/fix-pending', async (req, res) => {
-  try {
-    const { uid } = req.query;
-    await pool.query(
-      "INSERT INTO game_state(key,value) VALUES($1,'0') ON CONFLICT(key) DO UPDATE SET value='0'",
-      [`users/${uid}/pending_withdrawal`]
-    );
-    res.json({ ok: true });
-  } catch(e) { res.json({ ok: false, msg: e.message }); }
-});
-
-// ══ CLOUDINARY CLEANUP ══
-app.post('/clear-cloudinary', async (req, res) => {
-  try {
-    const auth = Buffer.from(`${CLOUDINARY_API_KEY}:${CLOUDINARY_API_SECRET}`).toString('base64');
-
-    // Active promos ውስጥ ያሉ photo URLs ይሰበስባል
-    const activePromos = await pool.query('SELECT photo_url FROM promotions WHERE active=true AND photo_url IS NOT NULL');
-    const activeUrls = new Set(activePromos.rows.map(r => r.photo_url).filter(Boolean));
-
-    // Cloudinary ላይ ያሉ images ሁሉ ያምጣል
-    const resources = await new Promise((resolve) => {
-      const options = {
-        hostname: 'api.cloudinary.com',
-        path: `/v1_1/${CLOUDINARY_CLOUD}/resources/image?max_results=100`,
-        method: 'GET',
-        headers: { 'Authorization': `Basic ${auth}` }
-      };
-      const req2 = https.request(options, (r) => {
-        let d = '';
-        r.on('data', c => d += c);
-        r.on('end', () => {
-          try { resolve(JSON.parse(d).resources || []); }
-          catch { resolve([]); }
-        });
-      });
-      req2.on('error', () => resolve([]));
-      req2.end();
+    const r = await fetch(`${BASE}/admin/set-settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        botWinPercent: Number(botWinPercent), 
+        noBotBias: Number(gameBias) 
+      })
     });
-
-    // Active promos ውስጥ የሌሉ images ይሰርዛል
-    let deleted = 0;
-    for (const resource of resources) {
-      const url = resource.secure_url;
-      if (!activeUrls.has(url)) {
-        await new Promise((resolve) => {
-          const postData = JSON.stringify({ public_ids: [resource.public_id] });
-          const options = {
-            hostname: 'api.cloudinary.com',
-            path: `/v1_1/${CLOUDINARY_CLOUD}/resources/image/upload`,
-            method: 'DELETE',
-            headers: {
-              'Authorization': `Basic ${auth}`,
-              'Content-Type': 'application/json',
-              'Content-Length': Buffer.byteLength(postData)
-            }
-          };
-          const req2 = https.request(options, (r) => { r.on('data', ()=>{}); r.on('end', resolve); });
-          req2.on('error', resolve);
-          req2.write(postData); req2.end();
-        });
-        deleted++;
-      }
-    }
-
-    console.log(`🗑️ Cloudinary cleanup: ${deleted} images deleted`);
-    res.json({ ok: true, deleted, total: resources.length, kept: resources.length - deleted });
-  } catch(e) {
-    console.error('❌ Cloudinary cleanup error:', e.message);
-    res.json({ ok: false, msg: e.message });
+    const d = await r.json();
+    if (d.ok) showToast(`✅ Saved! Bot Win: ${botWinPercent}% | Bias: ${gameBias}`, 'success');
+    else showToast('❌ Save failed', 'error');
+  } catch(e) { 
+    showToast('❌ Connection error', 'error'); 
   }
+}
+async function toggleBot() {
+  const btn = document.getElementById('botBtn');
+  btn.style.opacity = '0.6'; btn.style.pointerEvents = 'none';
+  try {
+    const isOn = document.getElementById('botBtnText').textContent.includes('DISABLE');
+    const botWinPercent = document.getElementById('botWinPct').value;
+    const gameBias = document.getElementById('gameBias').value;
+    await fetch(`${BASE}/admin/set-settings`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ botWinPercent: Number(botWinPercent), noBotBias: Number(gameBias) }) });
+    await fetch(`${BASE}/set-state`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ key:'smartBot/enabled', value: !isOn }) });
+    updateBotUI(!isOn);
+    showToast(!isOn ? '✅ Smart Bot enabled!' : '✅ Smart Bot disabled!', 'success');
+  } catch(e) { showToast('❌ Error', 'error'); }
+  btn.style.opacity = '1'; btn.style.pointerEvents = 'auto';
+}
+
+async function removeBots() {
+  try {
+    const r = await fetch(`${BASE}/remove-bots`, { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' });
+    const d = await r.json();
+    if (d.ok) showToast('✅ Bots removed!', 'success'); else showToast('❌ Error', 'error');
+  } catch(e) { showToast('❌ Connection error', 'error'); }
+}
+
+async function giveBalance() {
+  const uid = document.getElementById('giveUid').value.trim();
+  const amount = document.getElementById('giveAmount').value;
+  if (!uid) return showToast('❌ Telegram ID ያስገባ!', 'error');
+  if (!amount) return showToast('❌ Amount ያስገባ!', 'error');
+  try {
+    const r = await fetch(`${BASE}/give-balance`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ uid, amount: Number(amount) }) });
+    const d = await r.json();
+    if (d.ok) { showToast(`✅ ${amount} ብር ተጨመረ!`, 'success'); document.getElementById('giveUid').value = ''; document.getElementById('giveAmount').value = ''; }
+    else showToast('❌ ' + (d.msg || 'Error'), 'error');
+  } catch(e) { showToast('❌ Connection error', 'error'); }
+}
+
+async function updateBalance() {
+  const uid = document.getElementById('updateUid').value.trim();
+  const amount = document.getElementById('updateAmount').value;
+  const type = document.getElementById('updateType').value;
+  if (!uid) return showToast('❌ Telegram ID ያስገባ!', 'error');
+  if (!amount) return showToast('❌ Amount ያስገባ!', 'error');
+  try {
+    const r = await fetch(`${BASE}/update-balance`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ uid, amount: Number(amount), type }) });
+    const d = await r.json();
+    if (d.ok) { showToast(`✅ Balance updated! New: ${d.balance} ብር`, 'success'); document.getElementById('updateUid').value = ''; document.getElementById('updateAmount').value = ''; }
+    else showToast('❌ Error', 'error');
+  } catch(e) { showToast('❌ Connection error', 'error'); }
+}
+
+async function fetchHealth() {
+  const grid = document.getElementById('healthGrid');
+  grid.innerHTML = '<div class="loading">Loading...</div>';
+  try {
+    const r = await fetch(`${BASE}/health`);
+    const d = await r.json();
+    grid.innerHTML = `
+      <div class="stat-box"><div class="stat-lbl">STATUS</div><div class="stat-val c-green">${d.ok ? '✅ ONLINE' : '❌ DOWN'}</div></div>
+      <div class="stat-box"><div class="stat-lbl">USERS</div><div class="stat-val c-cyan">${d.users ?? '—'}</div></div>
+      <div class="stat-box"><div class="stat-lbl">NOTIFICATIONS</div><div class="stat-val c-purple">${d.notifications ?? '—'}</div></div>
+      <div class="stat-box"><div class="stat-lbl">WINNERS</div><div class="stat-val c-gold">${d.winners ?? '—'}</div></div>
+      <div class="stat-box" style="grid-column:span 2;"><div class="stat-lbl">DB SIZE</div><div class="stat-val c-blue">${d.db_size ?? '—'}</div></div>`;
+  } catch(e) { grid.innerHTML = '<div style="color:var(--red);text-align:center;padding:20px;">❌ Server unreachable</div>'; }
+}
+
+async function fetchWithdrawalBadge() {
+  try {
+    const r = await fetch(`${BASE}/withdrawals`);
+    const d = await r.json();
+    const keys = Object.keys(d.withdrawals || {}).filter(k => d.withdrawals[k].status === 'pending');
+    document.getElementById('wdTabBadge').textContent = keys.length > 0 ? ` (${keys.length})` : '';
+  } catch(e) {}
+}
+
+async function fetchWithdrawals() {
+  const list = document.getElementById('wdList');
+  if (!list) return;
+  list.innerHTML = '<div class="loading">Loading...</div>';
+  try {
+    const r = await fetch(`${BASE}/withdrawals`);
+    const d = await r.json();
+    const wds = d.withdrawals || {};
+    const keys = Object.keys(wds).filter(k => wds[k].status === 'pending');
+    if (!keys.length) { list.innerHTML = '<div class="empty">ምንም pending withdrawal የለም</div>'; return; }
+    list.innerHTML = keys.map(key => {
+      const w = wds[key];
+      return `<div class="list-item">
+        <div class="list-item-header">
+          <span class="list-item-name">👤 ${w.user_id}</span>
+          <span class="list-item-val">${w.amount} ብር</span>
+        </div>
+        ${w.method ? `<div style="font-size:12px;color:var(--cyan);margin-bottom:4px;">📱 ${w.method} — ${w.account || '—'}</div>` : ''}
+        <div class="list-item-sub">${new Date(w.time).toLocaleString()}</div>
+        <div class="row-btns">
+          <button class="small-btn s-green" onclick="wdAction('${key}','approve','${w.user_id}',${w.amount})">✅ APPROVE</button>
+          <button class="small-btn s-red" onclick="wdAction('${key}','reject','${w.user_id}',${w.amount})">❌ REJECT</button>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e) { list.innerHTML = '<div style="color:var(--red);text-align:center;padding:20px;">❌ Error</div>'; }
+}
+
+async function wdAction(key, action, uid, amount) {
+  try {
+    const r = await fetch(`${BASE}/withdrawal-action`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ key, action, uid, amount }) });
+    const d = await r.json();
+    if (d.ok) { showToast(action === 'approve' ? '✅ Approved!' : '✅ Rejected!', 'success'); fetchWithdrawals(); fetchWithdrawalBadge(); }
+    else showToast('❌ Error', 'error');
+  } catch(e) { showToast('❌ Connection error', 'error'); }
+}
+
+async function fetchNotifications() {
+  const list = document.getElementById('notifList');
+  list.innerHTML = '<div class="loading">Loading...</div>';
+  try {
+    const r = await fetch(`${BASE}/unread-notifications`);
+    const d = await r.json();
+    if (!d.length) { list.innerHTML = '<div class="empty">ምንም unread notification የለም ✅</div>'; return; }
+    list.innerHTML = d.map(n => `
+      <div class="list-item">
+        <div class="list-item-header">
+          <span class="list-item-name">👤 ${n.uid}</span>
+          <button class="small-btn s-cyan" style="width:auto;padding:6px 12px;" onclick="markRead(${n.id}, this)">✓ READ</button>
+        </div>
+        <div style="color:var(--text);font-size:13px;font-family:'Noto Sans Ethiopic',sans-serif;">${n.message}</div>
+      </div>`).join('');
+  } catch(e) { list.innerHTML = '<div style="color:var(--red);text-align:center;padding:20px;">❌ Error</div>'; }
+}
+
+async function markRead(id, btn) {
+  try {
+    await fetch(`${BASE}/mark-notification-read`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id }) });
+    btn.closest('.list-item').remove();
+    showToast('✅ Marked as read', 'success');
+  } catch(e) { showToast('❌ Error', 'error'); }
+}
+async function clearAnalytics() {
+  if (!confirm('Analytics ሁሉ ይጠፋል! እርግጠኛ ነህ?')) return;
+  try {
+    const r = await fetch(`${BASE}/clear-analytics`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}'
+    });
+    const d = await r.json();
+    if (d.ok) { showToast('✅ Analytics cleared!', 'success'); fetchAnalytics(); }
+    else showToast('❌ Error', 'error');
+  } catch(e) { showToast('❌ Connection error', 'error'); }
+}
+async function fetchAnalytics() {
+  const list = document.getElementById('analyticsList');
+  if (!list) return;
+  try {
+    const r = await fetch(`${BASE}/game-state`);
+    const d = await r.json();
+    const totalCollected   = d['analytics/totalCollected']   || 0;
+    const totalPaidOut     = d['analytics/totalPaidOut']     || 0;
+    const totalProfit      = d['analytics/totalProfit']      || 0;
+    const botBet           = d['analytics/botBet']           || 0;
+    const totalDeposits    = d['analytics/totalDeposits']    || 0;
+    const totalWithdrawals = d['analytics/totalWithdrawals'] || 0;
+    const history          = d['analytics/history']          || [];
+    const isProfit = totalProfit >= 0;
+    const profitColor = isProfit ? 'var(--green)' : 'var(--red)';
+    const profitBg = isProfit ? 'linear-gradient(135deg,#1b5e20,#0a1f0a)' : 'linear-gradient(135deg,#7f0000,#1a0000)';
+    const profitBorder = isProfit ? 'var(--green)' : 'var(--red)';
+    const profitLabel = isProfit ? '🏠 TOTAL HOUSE PROFIT' : '📉 TOTAL HOUSE LOSS';
+    list.innerHTML = `
+      <div style="background:${profitBg};border:2px solid ${profitBorder};border-radius:14px;padding:18px;margin-bottom:14px;text-align:center;">
+        <div style="color:var(--muted);font-size:11px;letter-spacing:2px;font-weight:700;margin-bottom:6px;">${profitLabel}</div>
+        <div style="color:${profitColor};font-size:36px;font-weight:700;">${totalProfit >= 0 ? '+' : ''}${totalProfit} ብር</div>
+        <div style="color:var(--muted);font-size:12px;margin-top:8px;font-family:'Noto Sans Ethiopic',sans-serif;line-height:1.6;">
+          Bot ካሸነፈ → ሰዎች bet ሁሉ ቤቱ ያገኛል ✅<br>Real player ካሸነፈ → ሰዎች bet - prize = ±ብር
+        </div>
+      </div>
+      <div style="color:var(--cyan);font-size:11px;letter-spacing:2px;font-weight:700;margin-bottom:8px;">📊 GAME STATS</div>
+      <div class="stat-grid" style="padding:0 0 14px;">
+        <div class="stat-box"><div class="stat-lbl">REAL BETS COLLECTED</div><div class="stat-val c-cyan">${totalCollected} ብር</div></div>
+        <div class="stat-box"><div class="stat-lbl">TOTAL PAID OUT</div><div class="stat-val c-gold">${totalPaidOut} ብር</div></div>
+        <div class="stat-box"><div class="stat-lbl">BOT BET (ቤቱ)</div><div class="stat-val c-purple">${botBet} ብር</div></div>
+        <div class="stat-box"><div class="stat-lbl">TOTAL DEPOSITS</div><div class="stat-val c-blue">${totalDeposits} ብር</div></div>
+        <div class="stat-box" style="grid-column:span 2;"><div class="stat-lbl">TOTAL WITHDRAWALS</div><div class="stat-val c-red">${totalWithdrawals} ብር</div></div>
+      </div>
+      <div style="color:var(--cyan);font-size:11px;letter-spacing:2px;font-weight:700;margin-bottom:10px;">📅 7 ቀን HISTORY</div>
+      ${history.length ? history.slice(-7).reverse().map(h => {
+        const hp = h.profit || 0;
+        const hc = hp >= 0 ? 'var(--green)' : 'var(--red)';
+        return `<div style="background:var(--card2);border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:8px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+            <div style="color:var(--muted);font-size:13px;">${h.date}</div>
+            <div style="color:${hc};font-weight:700;font-size:16px;">${hp >= 0 ? '+' : ''}${hp} ብር</div>
+          </div>
+          <div style="display:flex;gap:12px;flex-wrap:wrap;">
+            ${h.rounds ? `<span style="color:var(--muted);font-size:11px;">🎮 ${h.rounds} rounds</span>` : ''}
+            ${h.botWins ? `<span style="color:var(--muted);font-size:11px;">🤖 Bot wins: <span style="color:var(--green);">${h.botWins}</span></span>` : ''}
+            ${h.playerWins ? `<span style="color:var(--muted);font-size:11px;">👤 Player wins: <span style="color:var(--red);">${h.playerWins}</span></span>` : ''}
+          </div>
+        </div>`;
+      }).join('') : '<div class="empty">History የለም</div>'}`;
+  } catch(e) { if (list) list.innerHTML = '<div style="color:var(--red);text-align:center;padding:20px;">❌ Error</div>'; }
+}
+
+async function fetchWinners() {
+  const list = document.getElementById('winnersList');
+  list.innerHTML = '<div class="loading">Loading...</div>';
+  try {
+    const r = await fetch(`${BASE}/all-winners`);
+    const d = await r.json();
+    const winners = d.winners || [];
+    if (!winners.length) { list.innerHTML = '<div class="empty">ምንም winner የለም</div>'; return; }
+    list.innerHTML = winners.map(w => `
+      <div class="winner-row">
+        <div class="winner-left">
+          <div class="wname">${w.displayName || w.user}</div>
+          <div class="wcard">Card #${w.cardId}</div>
+        </div>
+        <div class="winner-right">
+          <div class="wprize">${w.prize} ብር</div>
+          <div class="wtime">${new Date(w.time).toLocaleString()}</div>
+        </div>
+      </div>`).join('');
+  } catch(e) { list.innerHTML = '<div style="color:var(--red);text-align:center;padding:20px;">❌ Error</div>'; }
+}
+
+// ── PROMOTIONS ──
+document.getElementById('promoTarget').addEventListener('change', function() {
+  document.getElementById('promoGroupRow').style.display = this.value === 'group' ? 'flex' : 'none';
+});
+document.getElementById('intervalTarget').addEventListener('change', function() {
+  document.getElementById('intervalGroupRow').style.display = this.value === 'group' ? 'flex' : 'none';
 });
 
-app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
+function onFileChange(inputId, labelId) {
+  const f = document.getElementById(inputId).files[0];
+  const lbl = document.getElementById(labelId);
+  if (f) { lbl.textContent = '✅ ' + f.name; lbl.classList.add('has-file'); }
+  else { lbl.textContent = '📷 Choose Photo'; lbl.classList.remove('has-file'); }
+}
+
+let sendNowPromoId = null;
+let sendNowPhotoUrl = null;
+
+async function onPromoFileChange() {
+  const file = document.getElementById('promoFile').files[0];
+  const label = document.getElementById('promoFileLabel');
+  const xBtn = document.getElementById('promoFileX');
+  if (!file) return;
+
+  label.textContent = '⏳ Uploading...';
+  const formData = new FormData();
+  formData.append('photo', file);
+  try {
+    const r = await fetch(`${BASE}/save-promo-photo`, { method:'POST', body: formData });
+    const d = await r.json();
+    if (d.ok) {
+      sendNowPromoId = d.promoId;
+      sendNowPhotoUrl = d.photoUrl;
+      label.textContent = '✅ ' + file.name;
+      label.classList.add('has-file');
+      xBtn.style.display = 'inline-flex';
+      showToast('✅ Photo uploaded!', 'success');
+    } else {
+      label.textContent = '📷 Choose Photo';
+      showToast('❌ Upload failed', 'error');
+    }
+  } catch(e) {
+    label.textContent = '📷 Choose Photo';
+    showToast('❌ Connection error', 'error');
+  }
+}
+
+async function removePromoPhoto() {
+  if (!sendNowPromoId && !sendNowPhotoUrl) return;
+  try {
+    await fetch(`${BASE}/delete-promo-photo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ promoId: sendNowPromoId, photoUrl: sendNowPhotoUrl })
+    });
+  } catch(e) {}
+  sendNowPromoId = null;
+  sendNowPhotoUrl = null;
+  document.getElementById('promoFile').value = '';
+  document.getElementById('promoFileLabel').textContent = '📷 Choose Photo';
+  document.getElementById('promoFileLabel').classList.remove('has-file');
+  document.getElementById('promoFileX').style.display = 'none';
+  showToast('✅ Photo removed!', 'success');
+}
+
+async function sendPromo() {
+  const text = document.getElementById('promoText').value.trim();
+  const targetType = document.getElementById('promoTarget').value;
+  const groupId = document.getElementById('promoGroupId').value.trim();
+  const file = document.getElementById('promoFile').files[0];
+  if (!text && !file) return showToast('❌ Message ወይም Photo ያስፈልጋል!', 'error');
+  const formData = new FormData();
+  formData.append('text', text);
+  formData.append('targetType', targetType);
+  if (groupId) formData.append('groupId', groupId);
+  if (sendNowPhotoUrl) formData.append('photoUrl', sendNowPhotoUrl);
+  else if (file) formData.append('photo', file);
+  try {
+    const r = await fetch(`${BASE}/send-promotion`, { method:'POST', body: formData });
+    const d = await r.json();
+    if (d.ok) {
+      showToast(d.msg || '✅ Promotion ተላከ!', 'success');
+      document.getElementById('promoText').value = '';
+      // Photo ከ DB ይሰርዛል (ከ Cloudinary አይሰርዝም — ተልኳልና)
+      if (sendNowPromoId) {
+        await fetch(`${BASE}/delete-promo-photo`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ promoId: sendNowPromoId, photoUrl: null })
+        });
+      }
+      sendNowPromoId = null;
+      sendNowPhotoUrl = null;
+      document.getElementById('promoFile').value = '';
+      document.getElementById('promoFileLabel').textContent = '📷 Choose Photo';
+      document.getElementById('promoFileLabel').classList.remove('has-file');
+      document.getElementById('promoFileX').style.display = 'none';
+    } else showToast('❌ ' + (d.msg || 'Error'), 'error');
+  } catch(e) { showToast('❌ Connection error', 'error'); }
+}
+
+async function createIntervalPromo() {
+  const text = document.getElementById('intervalText').value.trim();
+  const intervalMs = document.getElementById('intervalMs').value;
+  const targetType = document.getElementById('intervalTarget').value;
+  const groupId = document.getElementById('intervalGroupId').value.trim();
+  const file = document.getElementById('intervalFile').files[0];
+  if (!text && !file) return showToast('❌ Message ወይም Photo ያስፈልጋል!', 'error');
+  const formData = new FormData();
+  formData.append('text', text); formData.append('intervalMs', intervalMs); formData.append('targetType', targetType);
+  if (groupId) formData.append('groupId', groupId);
+  if (file) formData.append('photo', file);
+  try {
+    const r = await fetch(`${BASE}/create-interval-promotion`, { method:'POST', body: formData });
+    const d = await r.json();
+    if (d.ok) { showToast(d.msg || '✅ Interval Promo ተፈጠረ!', 'success'); document.getElementById('intervalText').value = ''; fetchPromos(); }
+    else showToast('❌ ' + (d.msg || 'Error'), 'error');
+  } catch(e) { showToast('❌ Connection error', 'error'); }
+}
+
+async function fetchPromos() {
+  const list = document.getElementById('promoList');
+  list.innerHTML = '<div class="loading">Loading...</div>';
+  try {
+    const r = await fetch(`${BASE}/promotions-list`);
+    const d = await r.json();
+    if (!d.length) { list.innerHTML = '<div class="empty">ምንም active promo የለም</div>'; return; }
+    const intervals = { 1800000:'30min', 3600000:'1hr', 7200000:'2hr', 10800000:'3hr', 21600000:'6hr', 43200000:'12hr', 86400000:'1day' };
+    list.innerHTML = d.map(p => `
+      <div class="list-item">
+        <div class="list-item-header">
+          <span class="promo-tag">⏰ ${intervals[p.interval_ms] || (p.interval_ms/3600000).toFixed(1)+'hr'}</span>
+          <span class="promo-tag">📡 ${p.target_type}</span>
+        </div>
+        <div style="color:var(--text);font-size:13px;margin:8px 0;font-family:'Noto Sans Ethiopic',sans-serif;">${p.text || '(Photo only)'}</div>
+        ${p.photo_url ? `<div style="font-size:11px;color:var(--cyan);margin-bottom:8px;">📷 Photo attached</div>` : ''}
+        <button class="small-btn s-red" onclick="if(confirm('Promo ይሰረዛል?')) deletePromo(${p.id})">🗑️ DELETE</button>
+      </div>`).join('');
+  } catch(e) { list.innerHTML = '<div style="color:var(--red);text-align:center;padding:20px;">❌ Error</div>'; }
+}
+
+async function deletePromo(id) {
+  try {
+    const r = await fetch(`${BASE}/delete-promotion`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ id }) });
+    const d = await r.json();
+    if (d.ok) { showToast('✅ Promo deleted!', 'success'); fetchPromos(); }
+    else showToast('❌ Error', 'error');
+  } catch(e) { showToast('❌ Connection error', 'error'); }
+}
+
+// ══════════════════════════════════════════════════
+//  AGENTS — 5 ቀን DAILY HISTORY
+// ══════════════════════════════════════════════════
+function getLast5Days() {
+  const days = [];
+  for (let i = 4; i >= 0; i--) {
+    const s = new Date(); s.setHours(0,0,0,0); s.setDate(s.getDate() - i);
+    const e = new Date(s.getTime() + 86400000);
+    const label = s.toLocaleDateString('am-ET', { month:'short', day:'numeric' });
+    days.push({ label, start: s.getTime(), end: e.getTime() });
+  }
+  return days;
+}
+
+function fmtT(str) {
+  try { return new Date(str).toLocaleTimeString('am-ET', { hour:'2-digit', minute:'2-digit' }); } catch { return ''; }
+}
+
+async function fetchAgents() {
+  const list = document.getElementById('agentsList');
+  list.innerHTML = '<div class="loading">Loading...</div>';
+  try {
+    const [agentsData, wData] = await Promise.all([
+      fetch(`${BASE}/agents`).then(r => r.json()),
+      fetch(`${BASE}/withdrawals`).then(r => r.json())
+    ]);
+    const allWD = wData.withdrawals || {};
+    const names = Object.keys(agentsData);
+    if (!names.length) { list.innerHTML = '<div class="empty">ምንም agent አልተጨመረም</div>'; return; }
+
+    const days = getLast5Days();
+
+    list.innerHTML = names.map(name => {
+      const info = agentsData[name];
+      const myTx = Object.values(allWD).filter(
+        w => w.acceptedBy === name && (w.status === 'approved' || w.status === 'rejected')
+      );
+      const totalApprAmt = myTx.filter(w => w.status === 'approved').reduce((s,w) => s + (w.amount||0), 0);
+      const totalApprCnt = myTx.filter(w => w.status === 'approved').length;
+      const totalRejCnt  = myTx.filter(w => w.status === 'rejected').length;
+
+      const dayStats = days.map(day => {
+        const dt = myTx.filter(w => { const t = w.time ? new Date(w.time).getTime() : 0; return t >= day.start && t < day.end; });
+        const appr = dt.filter(w => w.status === 'approved');
+        const rej  = dt.filter(w => w.status === 'rejected');
+        return { label: day.label, all: dt, appr, rej, apprAmt: appr.reduce((s,w) => s+(w.amount||0), 0) };
+      });
+
+      const maxAmt = Math.max(...dayStats.map(d => d.apprAmt), 1);
+      const cid = 'ac-' + name.replace(/[^a-zA-Z0-9]/g, '_');
+
+      return `
+<div class="agent-card" id="${cid}">
+  <div class="agent-card-header" onclick="toggleAgent('${cid}')">
+    <div class="agent-name-row">
+      <div class="agent-avatar">🕵️</div>
+      <div>
+        <div class="agent-name">${name}</div>
+        <div class="agent-id-tag">ID: ${info.id_number || '—'}</div>
+      </div>
+    </div>
+    <div class="agent-summary">
+      <div class="agent-sum-pill"><span>PAID</span>${totalApprAmt.toLocaleString()} ብር</div>
+      <div class="agent-sum-pill"><span>TX</span>${totalApprCnt} ጊዜ</div>
+      <div class="agent-sum-pill red"><span>REJ</span>${totalRejCnt} ጊዜ</div>
+      <div class="agent-toggle-icon" id="ico-${cid}">▼</div>
+    </div>
+  </div>
+
+  <div class="agent-history-body" id="bdy-${cid}">
+
+    <!-- 5 ቀን MINI BAR CHART -->
+    <div class="agent-mini-chart">
+      <div class="mini-chart-title">📊 5 ቀን OVERVIEW</div>
+      <div class="mini-bar-row">
+        ${dayStats.map(d => `
+          <div class="mini-bar-col">
+            <div class="mini-bar-amt">${d.apprAmt > 0 ? (d.apprAmt >= 1000 ? (d.apprAmt/1000).toFixed(1)+'k' : d.apprAmt) : '—'}</div>
+            <div class="mini-bar" style="height:${Math.max(3, Math.round(d.apprAmt/maxAmt*44))}px;"></div>
+            <div class="mini-bar-day">${d.label}</div>
+          </div>`).join('')}
+      </div>
+    </div>
+
+    <!-- PER DAY BREAKDOWN -->
+    ${dayStats.map(d => {
+      const total = d.all.length || 1;
+      const apprPct = Math.round(d.appr.length / total * 100);
+      const rejPct  = Math.round(d.rej.length  / total * 100);
+      return `
+      <div class="day-section">
+        <div class="day-header">
+          <div class="day-label">📅 ${d.label}</div>
+          <div class="day-stats-row">
+            <div class="day-stat-val" style="color:var(--green);">✅ ${d.apprAmt.toLocaleString()} ብር (${d.appr.length})</div>
+            <div style="color:var(--muted);font-size:11px;">|</div>
+            <div class="day-stat-val" style="color:var(--red);">❌ ${d.rej.length}</div>
+          </div>
+        </div>
+        ${d.all.length > 0 ? `
+        <div class="day-bars">
+          <div class="dbar-row">
+            <div class="dbar-lbl">APPROVED</div>
+            <div class="dbar-track"><div class="dbar-fill approved" style="width:${apprPct}%;"></div></div>
+            <div class="dbar-val" style="color:var(--green);">${d.appr.length} · ${apprPct}%</div>
+          </div>
+          <div class="dbar-row">
+            <div class="dbar-lbl">REJECTED</div>
+            <div class="dbar-track"><div class="dbar-fill rejected" style="width:${rejPct}%;"></div></div>
+            <div class="dbar-val" style="color:var(--red);">${d.rej.length} · ${rejPct}%</div>
+          </div>
+        </div>
+        <div class="tx-list">
+          ${d.all.sort((a,b) => new Date(b.time) - new Date(a.time)).map(w => `
+            <div class="tx-row">
+              <div class="tx-user">${w.display || w.full_name || w.username || w.user_id || '—'}</div>
+              <div class="tx-method">${w.method || 'BANK'}</div>
+              <div class="tx-amount">${(w.amount||0).toLocaleString()} ብር</div>
+              <div class="${w.status === 'approved' ? 'tx-ok' : 'tx-no'}">${w.status === 'approved' ? '✅ PAID' : '❌ REJ'}</div>
+              <div class="tx-time">${fmtT(w.time)}</div>
+            </div>`).join('')}
+        </div>` : '<div class="no-tx">— ምንም transaction የለም —</div>'}
+      </div>`;
+    }).join('')}
+
+    <div style="padding:12px 14px;">
+      <button class="small-btn s-red" onclick="deleteAgent('${name}')">🗑️ REMOVE AGENT</button>
+    </div>
+  </div>
+</div>`;
+    }).join('');
+
+  } catch(e) {
+    list.innerHTML = '<div style="color:var(--red);text-align:center;padding:20px;">❌ Error loading agents</div>';
+    console.error(e);
+  }
+}
+
+function toggleAgent(cid) {
+  const bdy = document.getElementById('bdy-' + cid);
+  const ico = document.getElementById('ico-' + cid);
+  const open = bdy.classList.toggle('open');
+  ico.classList.toggle('open', open);
+}
+
+async function addAgent() {
+  const name = document.getElementById('agentName').value.trim();
+  const id_number = document.getElementById('agentId').value.trim();
+  if (!name) return showToast('❌ Name ያስገባ!', 'error');
+  if (!id_number) return showToast('❌ ID Number ያስገባ!', 'error');
+  try {
+    const r = await fetch(`${BASE}/add-agent`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name, id_number }) });
+    const d = await r.json();
+    if (d.ok) { showToast('✅ Agent added!', 'success'); document.getElementById('agentName').value=''; document.getElementById('agentId').value=''; fetchAgents(); }
+    else showToast('❌ Error', 'error');
+  } catch(e) { showToast('❌ Connection error', 'error'); }
+}
+
+async function deleteAgent(name) {
+  try {
+    const r = await fetch(`${BASE}/delete-agent`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name }) });
+    const d = await r.json();
+    if (d.ok) { showToast('✅ Agent removed!', 'success'); fetchAgents(); }
+    else showToast('❌ Error', 'error');
+  } catch(e) { showToast('❌ Connection error', 'error'); }
+}
+
+async function changeAgentPass() {
+  const password = document.getElementById('agentPass').value;
+  if (!password) return showToast('❌ Password ያስገባ!', 'error');
+  try {
+    const r = await fetch(`${BASE}/change-agent-pass`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ password }) });
+    const d = await r.json();
+    if (d.ok) { showToast('✅ Password changed!', 'success'); document.getElementById('agentPass').value=''; }
+    else showToast('❌ Error', 'error');
+  } catch(e) { showToast('❌ Connection error', 'error'); }
+}
+
+// ── SETTINGS ──
+async function fetchConfig() {
+  try {
+    await fetch(`${BASE}/get-config`);
+    document.getElementById('loginPass').placeholder = 'Current: ****';
+    document.getElementById('settingsPass').placeholder = 'Current: ****';
+  } catch(e) {}
+}
+
+async function saveConfig() {
+  const loginPassword = document.getElementById('loginPass').value;
+  const settingsPassword = document.getElementById('settingsPass').value;
+  if (!loginPassword && !settingsPassword) return showToast('❌ Password ያስገባ!', 'error');
+  try {
+    const r = await fetch(`${BASE}/save-config`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ loginPassword, settingsPassword }) });
+    const d = await r.json();
+    if (d.ok) { showToast('✅ Config saved!', 'success'); document.getElementById('loginPass').value=''; document.getElementById('settingsPass').value=''; }
+    else showToast('❌ ' + (d.msg || 'Error'), 'error');
+  } catch(e) { showToast('❌ Connection error', 'error'); }
+}
+
+async function saveAccounts() {
+  const cbe = document.getElementById('cbeAccount').value.trim();
+  const telebirr = document.getElementById('telebirrAccount').value.trim();
+  if (!cbe && !telebirr) return showToast('❌ Account ያስገባ!', 'error');
+  try {
+    const r = await fetch(`${BASE}/save-accounts`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ cbe, telebirr }) });
+    const d = await r.json();
+    if (d.ok) showToast('✅ Accounts saved!', 'success'); else showToast('❌ Error', 'error');
+  } catch(e) { showToast('❌ Connection error', 'error'); }
+}
+
+// ── TOAST ──
+function showToast(msg, type='') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show ' + type;
+  setTimeout(() => { t.className = 'toast ' + type; }, 2800);
+}
+
+// ── INIT ──
+fetchState();
+fetchHealth();
+fetchWithdrawalStatus();
+setInterval(fetchState, 4000);
+setInterval(fetchWithdrawalStatus, 10000);
+</script>
+</body>
+</html>
