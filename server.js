@@ -677,6 +677,11 @@ app.post('/create-interval-promotion', multer({ storage: multer.memoryStorage() 
   const { text, targetType, groupId, intervalMs } = req.body;
   const photoBuffer = req.file ? req.file.buffer : null;
   if (!text && !photoBuffer) return res.json({ ok: false, msg: '❌ Message ወይም Photo ያስፈልጋል!' });
+
+  // ወዲያውኑ response ይላካል
+  res.json({ ok: true, msg: '✅ Interval promotion ተጀምሯል!' });
+
+  // Background ላይ Cloudinary upload + DB save ያደርጋል
   try {
     let photoUrl = '';
     if (photoBuffer) {
@@ -711,10 +716,9 @@ app.post('/create-interval-promotion', multer({ storage: multer.memoryStorage() 
       'INSERT INTO promotions(text,photo_url,target_type,group_id,interval_ms,next_send_at,active,created_at) VALUES($1,$2,$3,$4,$5,$6,true,$7)',
       [text || '', photoUrl, targetType || 'bot', groupId || '', Number(intervalMs) || 3600000, Date.now() + Number(intervalMs), Date.now()]
     );
-    res.json({ ok: true, msg: '✅ Interval promotion ተጀምሯል!' });
-  } catch(e) { res.json({ ok: false, msg: '❌ Error: ' + e.message }); }
+    console.log('✅ Interval promo created!');
+  } catch(e) { console.error('❌ create-interval-promotion error:', e.message); }
 });
-
 app.post('/send-promotion', multer({ storage: multer.memoryStorage() }).single('photo'), async (req, res) => {
   const { text, targetType, groupId, photoUrl } = req.body;
   const photoBuffer = req.file ? req.file.buffer : null;
