@@ -714,7 +714,7 @@ app.post('/create-interval-promotion', multer({ storage: multer.memoryStorage() 
     }
     await pool.query(
       'INSERT INTO promotions(text,photo_url,target_type,group_id,interval_ms,next_send_at,active,created_at) VALUES($1,$2,$3,$4,$5,$6,true,$7)',
-      [text || '', photoUrl, targetType || 'bot', groupId || '', Number(intervalMs) || 3600000, Date.now() + Number(intervalMs), Date.now()]
+      [text || '', photoUrl, targetType || 'bot', groupId || '', Number(intervalMs) || 3600000, Date.now() + (Number(intervalMs) || 3600000), Date.now()]
     );
     console.log('✅ Interval promo created!');
   } catch(e) { console.error('❌ create-interval-promotion error:', e.message); }
@@ -866,14 +866,14 @@ async function checkPromotions() {
         });
         await pool.query(
           'UPDATE promotions SET next_send_at=$1, last_sent_at=$2 WHERE id=$3',
-          [now + (p.interval_ms || 3600000), now, p.id]
+          [now + (Number(p.interval_ms) || 3600000), now, p.id]
         );
         console.log(`✅ Promotion sent! id=${p.id}`);
       } catch(e) {
         console.error('❌ Promotion send error:', e.message);
         await pool.query(
           'UPDATE promotions SET next_send_at=$1 WHERE id=$2',
-          [now + (p.interval_ms || 3600000), p.id]
+          [now + (Number(p.interval_ms) || 3600000), p.id]
         );
       }
     }
