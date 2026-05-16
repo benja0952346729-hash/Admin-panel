@@ -718,11 +718,15 @@ app.post('/create-interval-promotion', multer({ storage: multer.memoryStorage() 
 app.post('/send-promotion', multer({ storage: multer.memoryStorage() }).single('photo'), async (req, res) => {
   const { text, targetType, groupId, photoUrl } = req.body;
   const photoBuffer = req.file ? req.file.buffer : null;
-  if (!text && !photoBuffer) return res.json({ ok: false, msg: '❌ Message ወይም Photo ያስፈልጋል!' });
-  try {
-    await broadcastPromotion({ text, photoBuffer, photoUrl, targetType, groupId });
-    res.json({ ok: true, msg: '✅ Promotion ተላከ!' });
-  } catch(e) { res.json({ ok: false, msg: '❌ Error: ' + e.message }); }
+  if (!text && !photoBuffer && !photoUrl)
+    return res.json({ ok: false, msg: '❌ Message ወይም Photo ያስፈልጋል!' });
+
+  // ወዲያውኑ response — timeout አይሆንም
+  res.json({ ok: true, msg: '✅ Promotion እየተላከ ነው...' });
+
+  // Background ላይ ይሰራል
+  broadcastPromotion({ text, photoBuffer, photoUrl, targetType, groupId })
+    .catch(e => console.error('❌ broadcastPromotion:', e.message));
 });
 
 // ══ PROMOTION BROADCAST — ቀጥታ Telegram API ══
