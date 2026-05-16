@@ -24,12 +24,7 @@ async function updateAnalytics(key, amount) {
   }
 }
 
-async function getAnalytics(key) {
-  try {
-    const r = await pool.query('SELECT value FROM analytics WHERE key=$1', [key]);
-    return r.rows.length ? Number(r.rows[0].value) : 0;
-  } catch(e) { return 0; }
-}
+
 
 pool.query(`
   CREATE TABLE IF NOT EXISTS game_state (key TEXT PRIMARY KEY, value TEXT);
@@ -158,7 +153,7 @@ app.post('/submit-payment',
   }
 );
 
-// SSE
+// ══ SSE ══
 let sseClients = [];
 app.get('/events', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -173,7 +168,7 @@ function broadcast(data) {
   sseClients.forEach(client => { client.write(`data: ${JSON.stringify(data)}\n\n`); });
 }
 
-// TTS PROXY
+// ══ TTS PROXY ══
 const SOUNDS_SERVER = 'https://game-production-7f86.up.railway.app';
 
 app.get('/tts/winner-announce', async (req, res) => {
@@ -290,11 +285,15 @@ app.get('/game-state', async (req, res) => {
     flat['analytics/totalPaidOut']     = analyticsData['totalPaidOut']     || 0;
     flat['analytics/totalDeposits']    = analyticsData['totalDeposits']    || 0;
     flat['analytics/totalWithdrawals'] = analyticsData['totalWithdrawals'] || 0;
-    flat['analytics/totalProfit']      = analyticsData['totalProfit']      || 0;
     flat['analytics/houseCut']         = analyticsData['houseCut']         || 0;
     flat['analytics/botWinProfit']     = analyticsData['botWinProfit']     || 0;
     flat['analytics/botBet']           = analyticsData['botBet']           || 0;
-    flat['analytics/history']          = (await getState('analytics/history')) || [];
+
+    // ✅ totalProfit = የ 5 ቀን history ድምር ብቻ
+    const history = (await getState('analytics/history')) || [];
+    const totalProfit = history.reduce((sum, h) => sum + (h.profit || 0), 0);
+    flat['analytics/totalProfit'] = totalProfit;
+    flat['analytics/history']     = history;
 
     res.json(flat);
   } catch(e) { res.json({}); }
@@ -342,6 +341,7 @@ app.post('/give-balance', async (req, res) => {
     const r = await pool.query('SELECT balance FROM users WHERE uid=$1', [uid]);
     const newBal = r.rows[0]?.balance || 0;
     broadcast({ type: 'balance', uid, balance: newBal });
+    await updateAnalytics('totalDeposits', Number(amount)); // ✅ deposit analytics
     res.json({ ok: true });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
@@ -427,23 +427,7 @@ app.post('/change-agent-pass', async (req, res) => {
 
 app.post('/remove-bots', async (req, res) => {
   try {
-    // መጀመሪያ bot ids ያስቀምጥ
-    const botUsers = await pool.query('SELECT uid FROM users WHERE is_bot = true');
-    const botIds = new Set(botUsers.rows.map(r => r.uid));
-
-    // game/confirmedNumbers ከ bot cards አጸዳ
-    const allCards = (await getState('game/confirmedNumbers')) || {};
-    const cleanCards = {};
-    for (let cardId in allCards) {
-      if (!botIds.has(String(allCards[cardId]))) {
-        cleanCards[cardId] = allCards[cardId];
-      }
-    }
-    await setState('game/confirmedNumbers', cleanCards);
-
-    // ከዚያ bots ከ DB ሰርዝ
     await pool.query('DELETE FROM users WHERE is_bot = true');
-
     res.json({ ok: true });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
@@ -488,6 +472,33 @@ app.get('/get-balance', async (req, res) => {
   } catch(e) { res.json({ balance: 0 }); }
 });
 
+// ══ WITHDRAWAL TOGGLE ══
+app.get('/withdrawal-status', async (req, res) => {
+  try {
+    const enabled = (await getState('settings/withdrawal_enabled')) ?? true;
+    res.json({ enabled });
+  } catch(e) { res.json({ enabled: true }); }
+});
+
+app.post('/withdrawal-toggle', async (req, res) => {
+  try {
+    const { enabled } = req.body;
+    await setState('settings/withdrawal_enabled', enabled);
+    broadcast({ type: 'withdrawal_status', enabled });
+    res.json({ ok: true, enabled });
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
+});
+
+// ══ CLEAR ANALYTICS ══
+app.post('/clear-analytics', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM analytics');
+    await setState('analytics/history', []);
+    console.log('🔄 Analytics manually cleared');
+    res.json({ ok: true });
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
+});
+
 // ══ CLOUDINARY ══
 const CLOUDINARY_CLOUD = 'diado1bxi';
 const CLOUDINARY_API_KEY = '117446111831141';
@@ -526,28 +537,7 @@ async function loadCloudinarySounds() {
     req.end();
   });
 }
-app.get('/withdrawal-status', async (req, res) => {
-  try {
-    const status = await getState('settings/withdrawal_enabled');
-    res.json({ enabled: status !== false });
-  } catch(e) { res.json({ enabled: true }); }
-});
 
-app.post('/withdrawal-toggle', async (req, res) => {
-  try {
-    const { enabled } = req.body;
-    await setState('settings/withdrawal_enabled', enabled);
-    res.json({ ok: true, enabled });
-  } catch(e) { res.json({ ok: false }); }
-});
-app.post('/clear-analytics', async (req, res) => {
-  try {
-    await pool.query('DELETE FROM analytics');
-    await setState('analytics/history', []);
-    await setState('analytics/lastFullReset', Date.now());
-    res.json({ ok: true, msg: '✅ Analytics cleared!' });
-  } catch(e) { res.json({ ok: false, msg: e.message }); }
-});
 app.get('/get-config', async (req, res) => {
   try {
     const r = await pool.query("SELECT value FROM game_state WHERE key='adminConfig'");
@@ -684,7 +674,6 @@ app.post('/confirm-card', async (req, res) => {
     await setState('game/prize', prize);
     await setState('game/total', bet * total);
 
-    // ✅ real player card ሲያዝ ብቻ totalCollected ይጨምራል
     await updateAnalytics('totalCollected', bet);
 
     const currentBet = await getState('game/bet');
@@ -705,6 +694,9 @@ let callTimer = null;
 let countdownTimer = null;
 let announceTimer = null;
 let roundNumber = 1;
+
+// ══ GAME PERCENT (global for announceWinner) ══
+let gamePct = 80;
 
 console.log('🚀 Bingo Server Started!');
 
@@ -862,7 +854,6 @@ async function addBotsIfNeeded() {
     const newPrize = Math.floor(newTotal * (pct / 100));
     await setState('game/prize', newPrize);
     await setState('game/total', newTotal);
-    // ✅ bot bet analytics ውስጥ ይቆጠራል (reference ብቻ — profit ሒሳብ አይጨምርም)
     await updateAnalytics('botBet', bet * botsNeeded);
     console.log(`🤖 Added ${botsNeeded} bots. Total cards: ${total}, prize: ${newPrize}`);
   } catch(e) { console.error('❌ addBotsIfNeeded error:', e.message); }
@@ -898,16 +889,13 @@ async function autoCallNumber(speed) {
 
   console.log(`🎮 Real cards: ${realCards.length}, Bot cards: ${botCards.length}`);
 
-  // ══ ✅ FIXED: realBetsTotal — real players ብቻ ══
   const bet = (await getState('game/bet')) || 0;
-  const gamePct = (await getState('game/percent')) || 80;
+  gamePct = (await getState('game/percent')) || 80;
   const realBetsTotal = bet * realCards.length;
   const botBetsTotal  = bet * botCards.length;
 
-  // prize = ሁሉ cards (real + bot) × bet × pct — display ለ players
   const totalCards = Object.keys(allCards).length;
   const prize = Math.floor(bet * totalCards * (gamePct / 100));
-
   await setState('game/prize', prize);
 
   const botWinPercent = (await getState('autoMode/botWinPercent')) ?? 50;
@@ -932,7 +920,7 @@ async function autoCallNumber(speed) {
   const neededNums = generateBoard(Number(targetCard.cardId)).filter(n => n !== 'FREE');
   const allBoards = {};
   for (let cardId in cardInfoMap) allBoards[cardId] = generateBoard(Number(cardId));
-  const noBotBias = (await getState('autoMode/noBotBias')) ?? 0.50;
+
   callTimer = setInterval(async () => {
     try {
       if (!autoModeOn) { clearInterval(callTimer); return; }
@@ -940,7 +928,6 @@ async function autoCallNumber(speed) {
       const pend = await getState('game/pendingWinner');
       if (pend && !pend.announced) {
         clearInterval(callTimer);
-        // ✅ realBetsTotal pass ይደረጋል announceWinner ዉስጥ ለ profit ሒሳብ
         startAutoAnnounce(realBetsTotal, botBetsTotal);
         return;
       }
@@ -972,6 +959,7 @@ async function autoCallNumber(speed) {
       const safeNeeded = neededRemaining.filter(n => safeRemaining.includes(n));
 
       let n;
+      const noBotBias = (await getState('autoMode/noBotBias')) ?? 0.50;
       const rand = Math.random();
       if (safeNeeded.length > 0 && rand < noBotBias)
         n = safeNeeded[Math.floor(Math.random() * safeNeeded.length)];
@@ -995,14 +983,12 @@ async function autoCallNumber(speed) {
         clearInterval(callTimer);
         console.log(`🏆 Winner found after ${calledNumbers.length} calls`);
         await setState('game/pendingWinner', { winners, prize, announced: false, time: Date.now() });
-        // ✅ realBetsTotal pass ይደረጋል
         startAutoAnnounce(realBetsTotal, botBetsTotal);
       }
     } catch(e) { console.error('❌ callNumber error:', e.message); }
   }, speed);
 }
 
-// ✅ realBetsTotal parameter ተጨምሯል
 async function startAutoAnnounce(realBetsTotal, botBetsTotal) {
   if (!autoModeOn) return;
   clearAllTimers();
@@ -1021,37 +1007,22 @@ async function startAutoAnnounce(realBetsTotal, botBetsTotal) {
   }, 1000);
 }
 
-// ══ ✅ FIXED announceWinner — ትክክለኛ profit ሒሳብ ══
+// ══ ANNOUNCE WINNER + SSE winner_popup broadcast ══
 async function announceWinner(realBetsTotal, botBetsTotal) {
   try {
     const data = await getState('game/pendingWinner');
     if (!data) return;
     const { winners, prize } = data;
-const share = Math.floor(prize / winners.length);
-const gamePct = (await getState('game/percent')) || 80;
-
-    // ══════════════════════════════════════════════
-    // ✅ ትክክለኛ PROFIT LOGIC:
-    //
-    // realBetsTotal = real players ብቻ ያስገቡት ብር
-    //                 (bot bet ቤቱ ነው — ወጪ አይደለም)
-    //
-    // Bot ካሸነፈ:
-    //   profit = realBetsTotal - 0 = +realBetsTotal
-    //   (prize ወደ player አልሄደም)
-    //
-    // Real Player ካሸነፈ:
-    //   profit = realBetsTotal - prize
-    //   (ሊሆን ይችላል negative — ቤቱ ኪሳ)
-    // ══════════════════════════════════════════════
+    const share = Math.floor(prize / winners.length);
 
     let realWinShare = 0;
+    let botWinShare = 0;  // ← bot ድርሻ ብቻ ይቆጠራል
     let botWon = false;
 
     for (let w of winners) {
       if (w.isBot) {
         botWon = true;
-        // prize ወደ bot አይሄድም — ቤቱ ያቆያል
+        botWinShare += share;  // ← ቤቱ ያቆያል
       } else {
         realWinShare += share;
         await pool.query('UPDATE users SET balance = balance + $1 WHERE uid=$2', [share, w.user]);
@@ -1063,7 +1034,7 @@ const gamePct = (await getState('game/percent')) || 80;
         );
       }
     }
-    
+
     const winnersObj = {};
     winners.forEach((w, i) => { winnersObj[i] = { ...w, prize: share }; });
     await setState('game/winners', winnersObj);
@@ -1075,7 +1046,31 @@ const gamePct = (await getState('game/percent')) || 80;
       );
     }
 
-    broadcast({ type: 'winner', winners, prize, share, calledNumbers, time: Date.now() });
+    // ══════════════════════════════════════════════════
+    // ✅ SSE broadcast — winner (ለሁሉ game state ለ update)
+    // + winner_popup (ለ አሸናፊ client ብቻ popup ያሳያል)
+    // ══════════════════════════════════════════════════
+    const winnerPayload = {
+      type: 'winner',
+      winners,
+      prize,
+      share,
+      calledNumbers,
+      time: Date.now()
+    };
+    broadcast(winnerPayload);
+
+    // ── winner_popup: ለ real player አሸናፊዎች ብቻ ──
+    // (index.html ላይ userId ጋር ያወዳድራል — bot አይታይም)
+    broadcast({
+      type: 'winner_popup',
+      winners: winners.filter(w => !w.isBot),
+      share,
+      prize,
+      calledNumbers,
+      time: Date.now()
+    });
+
     await setState('game/announcement', { type: 'winner', winners, prize, share, time: Date.now(), calledNumbers });
     await setState('game/paid', true);
     await setState('game/pendingWinner', { ...data, announced: true });
@@ -1084,31 +1079,29 @@ const gamePct = (await getState('game/percent')) || 80;
       await setState('game/status', { started: false, waitingRestart: true });
     }, 6000);
 
-    // ══ ✅ FIXED ANALYTICS ══
-    //
-    // totalPaidOut = real players ብቻ የተከፈለ
+    // ══ ANALYTICS ══
     await updateAnalytics('totalPaidOut', realWinShare);
+    if (botWon) await updateAnalytics('botWinProfit', botWinShare);
 
-    // ══ ትክክለኛ profit ሒሳብ ══
-    // houseCut  = total × (100% - prize%)  ← ሁሌም ቤቱ
-    // Bot ካሸነፈ:    houseCut + prize = total  (prize ቤቱ ነው)
-    // Player ካሸነፈ: houseCut - botBetsTotal  (bot bet ወጪ ነው)
-    const houseCut = Math.floor((realBetsTotal + botBetsTotal) * (1 - (gamePct / 100)));
-    const roundProfit = botWon
-      ? houseCut + prize                  // bot ካሸነፈ: houseCut + prize(ቤቱ ነው)
-      : houseCut - botBetsTotal;          // player ካሸነፈ: houseCut - bot bet(ወጪ)
+    // ✅ ትክክለኛ profit formula:
+    // ቤቱ ያገኘው = realBetsTotal (real players ብቻ)
+    // ቤቱ የከፈለ = realWinShare (player ካሸነፈ)
+    // ቤቱ ወጪ   = botBetsTotal (bot bet)
+    const roundProfit = realBetsTotal - realWinShare - botBetsTotal;
     await updateAnalytics('totalProfit', roundProfit);
 
-    // Daily history
+    // ══ DAILY HISTORY — ሁሌ አዲስ ቀን ከ 0 ይጀምራል ══
     const todayStr = new Date().toISOString().split('T')[0];
     const history = (await getState('analytics/history')) || [];
     const todayIdx = history.findIndex(h => h.date === todayStr);
     if (todayIdx >= 0) {
+      // ቀኑ አለ → ይጨምራል
       history[todayIdx].profit = (history[todayIdx].profit || 0) + roundProfit;
       history[todayIdx].rounds = (history[todayIdx].rounds || 0) + 1;
       if (botWon) history[todayIdx].botWins = (history[todayIdx].botWins || 0) + 1;
       else history[todayIdx].playerWins = (history[todayIdx].playerWins || 0) + 1;
     } else {
+      // አዲስ ቀን → 0 ጀምሮ ይጨምራል
       history.push({
         date: todayStr,
         profit: roundProfit,
@@ -1117,9 +1110,9 @@ const gamePct = (await getState('game/percent')) || 80;
         playerWins: botWon ? 0 : 1
       });
     }
-    await setState('analytics/history', history.slice(-5));
+    await setState('analytics/history', history.slice(-5)); // ← 5 ቀን ይቀራል
 
-    console.log(`✅ Round done! realBets:${realBetsTotal} paidOut:${realWinShare} profit:${roundProfit} botWon:${botWon}`);
+    console.log(`✅ Round done! realBets:${realBetsTotal} botBets:${botBetsTotal} paidOut:${realWinShare} profit:${roundProfit} botWon:${botWon}`);
   } catch(e) { console.error('❌ announceWinner error:', e.message); }
 }
 
@@ -1237,6 +1230,7 @@ setTimeout(async () => {
       autoModeOn = true;
       autoCdMinutes = (await getState('autoMode/cdMinutes')) || 3;
       roundNumber = (await getState('autoMode/round')) || 1;
+      gamePct = (await getState('game/percent')) || 80;
       const gameStatus = await getState('game/status');
       if (gameStatus?.started) {
         await scheduleNextRound();
@@ -1253,7 +1247,6 @@ setInterval(async () => {
     await pool.query(`DELETE FROM all_winners WHERE id NOT IN (SELECT id FROM all_winners ORDER BY time DESC LIMIT 500)`);
     await pool.query('DELETE FROM promotions WHERE active=false AND created_at < $1', [Date.now() - (30 * 24 * 60 * 60 * 1000)]);
 
-    // ✅ 5 ቀን analytics reset
     const lastReset = (await getState('analytics/lastFullReset')) || 0;
     const fiveDays = 5 * 24 * 60 * 60 * 1000;
     if (Date.now() - lastReset >= fiveDays) {
@@ -1294,7 +1287,10 @@ app.post('/admin/set-settings', async (req, res) => {
   try {
     const { bet, percent, cdMinutes, callSpeed, botWinPercent, botMinCards, noBotBias } = req.body;
     if (bet !== undefined) await setState('game/bet', Number(bet));
-    if (percent !== undefined) await setState('game/percent', Number(percent));
+    if (percent !== undefined) {
+      await setState('game/percent', Number(percent));
+      gamePct = Number(percent);
+    }
     if (cdMinutes !== undefined) await setState('autoMode/cdMinutes', Number(cdMinutes));
     if (callSpeed !== undefined) await setState('autoMode/callSpeed', Number(callSpeed));
     if (botWinPercent !== undefined) await setState('autoMode/botWinPercent', Number(botWinPercent));
@@ -1415,21 +1411,14 @@ app.post(
       }
 
       allWd[key].status = 'approved';
-await setState('bot/withdrawals', allWd);
-await updateAnalytics('totalWithdrawals', amount);
-
-// ✅ Balance ወደ 0 ይዝጋ (pending withdrawal)
-await pool.query(
-  "UPDATE game_state SET value='0' WHERE key=$1",
-  [`users/${uid}/pending_withdrawal`]
-);
-
-await pool.query(
-  'INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
-  [uid, `✅ ${amount} ብር በ ${method} ተላከ!\n📋 Account: ${account}`, Date.now()]
-);
-broadcast({ type: 'withdrawal_approved', key, uid, amount });
-res.json({ ok: true });
+      await setState('bot/withdrawals', allWd);
+      await updateAnalytics('totalWithdrawals', amount);
+      await pool.query(
+        'INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
+        [uid, `✅ ${amount} ብር በ ${method} ተላከ!`, Date.now()]
+      );
+      broadcast({ type: 'withdrawal_approved', key, uid, amount });
+      res.json({ ok: true });
     } catch(e) { res.json({ ok: false, msg: e.message }); }
   }
 );
@@ -1451,7 +1440,8 @@ app.post('/agent-verify', async (req, res) => {
     res.json({ ok: true, agentName: name });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
-// ══ DB ENDPOINTS — bot ጋር compatibility ══
+
+// ══ DB ENDPOINTS ══
 app.get('/db-get', async (req, res) => {
   try {
     const { path } = req.query;
@@ -1497,6 +1487,7 @@ app.post('/db-push', async (req, res) => {
     res.json({ ok: true, key });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
+
 app.get('/fix-pending', async (req, res) => {
   try {
     const { uid } = req.query;
