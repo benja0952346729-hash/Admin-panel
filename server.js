@@ -372,7 +372,7 @@ app.post('/save-promo-photo', multer({ storage: multer.memoryStorage() }).single
     const body = Buffer.concat([
       Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="promo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
       photoBuffer,
-      Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="upload_preset"\r\n\r\nunsigned_preset\r\n--${boundary}--\r\n`)
+      Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="upload_preset"\r\n\r\nml_default\r\n--${boundary}--\r\n`)
     ]);
     const photoUrl = await new Promise((resolve) => {
       const options = {
@@ -685,7 +685,7 @@ app.post('/create-interval-promotion', multer({ storage: multer.memoryStorage() 
       const body = Buffer.concat([
         Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="promo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
         photoBuffer,
-        Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="upload_preset"\r\n\r\nunsigned_preset\r\n--${boundary}--\r\n`)
+        Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="upload_preset"\r\n\r\nml_default\r\n--${boundary}--\r\n`)
       ]);
       photoUrl = await new Promise((resolve) => {
         const options = {
