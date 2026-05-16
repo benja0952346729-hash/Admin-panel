@@ -614,6 +614,7 @@ app.post('/clear-analytics', async (req, res) => {
 const CLOUDINARY_CLOUD = 'diado1bxi';
 const CLOUDINARY_API_KEY = '117446111831141';
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_SECRET || 'biCrRU-O4tFt_icW8ONKE5POXJk';
+const app = express();
 
 let soundsMap = {};
 
