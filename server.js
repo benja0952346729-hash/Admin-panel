@@ -24,8 +24,6 @@ async function updateAnalytics(key, amount) {
   }
 }
 
-
-
 pool.query(`
   CREATE TABLE IF NOT EXISTS game_state (key TEXT PRIMARY KEY, value TEXT);
   CREATE TABLE IF NOT EXISTS users (uid TEXT PRIMARY KEY, display TEXT, balance NUMERIC DEFAULT 0, is_bot BOOLEAN DEFAULT false);
@@ -289,7 +287,6 @@ app.get('/game-state', async (req, res) => {
     flat['analytics/botWinProfit']     = analyticsData['botWinProfit']     || 0;
     flat['analytics/botBet']           = analyticsData['botBet']           || 0;
 
-    // ✅ totalProfit = የ 5 ቀን history ድምር ብቻ
     const history = (await getState('analytics/history')) || [];
     const totalProfit = history.reduce((sum, h) => sum + (h.profit || 0), 0);
     flat['analytics/totalProfit'] = totalProfit;
@@ -326,9 +323,123 @@ app.get('/promotions-list', async (req, res) => {
 app.post('/delete-promotion', async (req, res) => {
   try {
     const { id } = req.body;
-    await pool.query('UPDATE promotions SET active=false WHERE id=$1', [id]);
+
+    // photo_url ያምጣል ከ Cloudinary ለ delete
+    const r = await pool.query('SELECT photo_url FROM promotions WHERE id=$1', [id]);
+    const photoUrl = r.rows[0]?.photo_url || '';
+
+    // Cloudinary ላይ ይሰርዛል
+    if (photoUrl) {
+      try {
+        const match = photoUrl.match(/\/upload\/(?:v\d+\/)?(.+)\.[a-z]+$/i);
+        const publicId = match ? match[1] : null;
+        if (publicId) {
+          const auth = Buffer.from(`${CLOUDINARY_API_KEY}:${CLOUDINARY_API_SECRET}`).toString('base64');
+          const postData = JSON.stringify({ public_ids: [publicId] });
+          await new Promise((resolve) => {
+            const options = {
+              hostname: 'api.cloudinary.com',
+              path: `/v1_1/${CLOUDINARY_CLOUD}/resources/image/upload`,
+              method: 'DELETE',
+              headers: {
+                'Authorization': `Basic ${auth}`,
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(postData)
+              }
+            };
+            const req2 = https.request(options, (r2) => { r2.on('data', ()=>{}); r2.on('end', resolve); });
+            req2.on('error', resolve);
+            req2.write(postData); req2.end();
+          });
+          console.log(`🗑️ Cloudinary deleted: ${publicId}`);
+        }
+      } catch(e) { console.error('❌ Cloudinary delete error:', e.message); }
+    }
+
+    // DB ላይ ይሰርዛል
+    await pool.query('DELETE FROM promotions WHERE id=$1', [id]);
     res.json({ ok: true });
-  } catch(e) { res.json({ ok: false }); }
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
+});
+
+// ══ SEND NOW PHOTO SAVE ══
+app.post('/save-promo-photo', multer({ storage: multer.memoryStorage() }).single('photo'), async (req, res) => {
+  const photoBuffer = req.file ? req.file.buffer : null;
+  if (!photoBuffer) return res.json({ ok: false, msg: '❌ Photo የለም!' });
+  try {
+    const auth = Buffer.from(`${CLOUDINARY_API_KEY}:${CLOUDINARY_API_SECRET}`).toString('base64');
+    const boundary = '----FormBoundary' + Date.now();
+    const body = Buffer.concat([
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="promo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
+      photoBuffer,
+      Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="upload_preset"\r\n\r\nunsigned_preset\r\n--${boundary}--\r\n`)
+    ]);
+    const photoUrl = await new Promise((resolve) => {
+      const options = {
+        hostname: 'api.cloudinary.com',
+        path: `/v1_1/${CLOUDINARY_CLOUD}/image/upload`,
+        method: 'POST',
+        headers: {
+          'Content-Type': `multipart/form-data; boundary=${boundary}`,
+          'Content-Length': body.length,
+          'Authorization': `Basic ${auth}`
+        }
+      };
+      const req2 = https.request(options, (r) => {
+        let d = '';
+        r.on('data', c => d += c);
+        r.on('end', () => { try { resolve(JSON.parse(d).secure_url || ''); } catch { resolve(''); } });
+      });
+      req2.on('error', () => resolve(''));
+      req2.write(body); req2.end();
+    });
+
+    // DB ውስጥ temp promo ያስቀምጣል (active=false, interval=0)
+    const result = await pool.query(
+      'INSERT INTO promotions(text,photo_url,target_type,interval_ms,active,created_at) VALUES($1,$2,$3,$4,false,$5) RETURNING id',
+      ['__send_now__', photoUrl, 'bot', 0, Date.now()]
+    );
+    res.json({ ok: true, photoUrl, promoId: result.rows[0].id });
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
+});
+
+// ══ DELETE SEND NOW PHOTO ══
+app.post('/delete-promo-photo', async (req, res) => {
+  try {
+    const { promoId, photoUrl } = req.body;
+
+    // Cloudinary ላይ ይሰርዛል
+    if (photoUrl) {
+      try {
+        const match = photoUrl.match(/\/upload\/(?:v\d+\/)?(.+)\.[a-z]+$/i);
+        const publicId = match ? match[1] : null;
+        if (publicId) {
+          const auth = Buffer.from(`${CLOUDINARY_API_KEY}:${CLOUDINARY_API_SECRET}`).toString('base64');
+          const postData = JSON.stringify({ public_ids: [publicId] });
+          await new Promise((resolve) => {
+            const options = {
+              hostname: 'api.cloudinary.com',
+              path: `/v1_1/${CLOUDINARY_CLOUD}/resources/image/upload`,
+              method: 'DELETE',
+              headers: {
+                'Authorization': `Basic ${auth}`,
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(postData)
+              }
+            };
+            const req2 = https.request(options, (r2) => { r2.on('data', ()=>{}); r2.on('end', resolve); });
+            req2.on('error', resolve);
+            req2.write(postData); req2.end();
+          });
+          console.log(`🗑️ Cloudinary deleted: ${publicId}`);
+        }
+      } catch(e) { console.error('❌ Cloudinary delete error:', e.message); }
+    }
+
+    // DB ላይ ይሰርዛል
+    if (promoId) await pool.query('DELETE FROM promotions WHERE id=$1', [promoId]);
+    res.json({ ok: true });
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
 
 app.post('/give-balance', async (req, res) => {
@@ -341,7 +452,7 @@ app.post('/give-balance', async (req, res) => {
     const r = await pool.query('SELECT balance FROM users WHERE uid=$1', [uid]);
     const newBal = r.rows[0]?.balance || 0;
     broadcast({ type: 'balance', uid, balance: newBal });
-    await updateAnalytics('totalDeposits', Number(amount)); // ✅ deposit analytics
+    await updateAnalytics('totalDeposits', Number(amount));
     res.json({ ok: true });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
@@ -561,6 +672,7 @@ app.post('/save-config', async (req, res) => {
 app.get('/sounds-map', (req, res) => res.json(soundsMap));
 loadCloudinarySounds();
 
+// ══ PROMOTIONS ══
 app.post('/create-interval-promotion', multer({ storage: multer.memoryStorage() }).single('photo'), async (req, res) => {
   const { text, targetType, groupId, intervalMs } = req.body;
   const photoBuffer = req.file ? req.file.buffer : null;
@@ -580,7 +692,11 @@ app.post('/create-interval-promotion', multer({ storage: multer.memoryStorage() 
           hostname: 'api.cloudinary.com',
           path: `/v1_1/${CLOUDINARY_CLOUD}/image/upload`,
           method: 'POST',
-          headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length, 'Authorization': `Basic ${auth}` }
+          headers: {
+            'Content-Type': `multipart/form-data; boundary=${boundary}`,
+            'Content-Length': body.length,
+            'Authorization': `Basic ${auth}`
+          }
         };
         const request = require('https').request(options, (r) => {
           let d = '';
@@ -609,6 +725,121 @@ app.post('/send-promotion', multer({ storage: multer.memoryStorage() }).single('
   } catch(e) { res.json({ ok: false, msg: '❌ Error: ' + e.message }); }
 });
 
+// ══ PROMOTION BROADCAST — ቀጥታ Telegram API ══
+async function broadcastPromotion(promoData) {
+  try {
+    const { text, photoBuffer, photoUrl, targetType, groupId } = promoData;
+    const BOT_TOKEN = process.env.BOT_TOKEN || '';
+
+    if (!BOT_TOKEN) {
+      console.error('❌ BOT_TOKEN not set!');
+      return;
+    }
+
+    // ── Group ሲሆን ──
+    if (targetType === 'group' && groupId) {
+      const bodyData = JSON.stringify({ chat_id: groupId, text: text || '', parse_mode: 'HTML' });
+      await new Promise((resolve) => {
+        const opts = {
+          hostname: 'api.telegram.org',
+          path: `/bot${BOT_TOKEN}/sendMessage`,
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(bodyData) }
+        };
+        const r2 = https.request(opts, (r) => { r.on('data', ()=>{}); r.on('end', resolve); });
+        r2.on('error', resolve);
+        r2.write(bodyData); r2.end();
+      });
+      console.log('✅ Group promotion sent!');
+      return;
+    }
+
+    // ── Bot Users ሁሉ ──
+    const usersRes = await pool.query('SELECT uid FROM users WHERE is_bot = false');
+    const uids = usersRes.rows.map(r => r.uid);
+    console.log(`📢 Sending promotion to ${uids.length} users...`);
+
+    for (const uid of uids) {
+      try {
+        if (photoBuffer) {
+          // Photo buffer ጋር
+          const boundary = '----FormBoundary' + Date.now();
+          const body = Buffer.concat([
+            Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${uid}\r\n`),
+            Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${text || ''}\r\n`),
+            Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="parse_mode"\r\n\r\nHTML\r\n`),
+            Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="promo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
+            photoBuffer,
+            Buffer.from(`\r\n--${boundary}--\r\n`)
+          ]);
+          await new Promise((resolve) => {
+            const opts = {
+              hostname: 'api.telegram.org',
+              path: `/bot${BOT_TOKEN}/sendPhoto`,
+              method: 'POST',
+              headers: {
+                'Content-Type': `multipart/form-data; boundary=${boundary}`,
+                'Content-Length': body.length
+              }
+            };
+            const r2 = https.request(opts, (r) => { r.on('data', ()=>{}); r.on('end', resolve); });
+            r2.on('error', resolve);
+            r2.write(body); r2.end();
+          });
+        } else if (photoUrl) {
+          // Cloudinary photo URL ጋር
+          const bodyData = JSON.stringify({
+            chat_id: uid,
+            photo: photoUrl,
+            caption: text || '',
+            parse_mode: 'HTML'
+          });
+          await new Promise((resolve) => {
+            const opts = {
+              hostname: 'api.telegram.org',
+              path: `/bot${BOT_TOKEN}/sendPhoto`,
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(bodyData)
+              }
+            };
+            const r2 = https.request(opts, (r) => { r.on('data', ()=>{}); r.on('end', resolve); });
+            r2.on('error', resolve);
+            r2.write(bodyData); r2.end();
+          });
+        } else {
+          // Text ብቻ
+          const bodyData = JSON.stringify({
+            chat_id: uid,
+            text: text || '',
+            parse_mode: 'HTML'
+          });
+          await new Promise((resolve) => {
+            const opts = {
+              hostname: 'api.telegram.org',
+              path: `/bot${BOT_TOKEN}/sendMessage`,
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(bodyData)
+              }
+            };
+            const r2 = https.request(opts, (r) => { r.on('data', ()=>{}); r.on('end', resolve); });
+            r2.on('error', resolve);
+            r2.write(bodyData); r2.end();
+          });
+        }
+        // Rate limit ለማስቀረት 50ms delay
+        await new Promise(r => setTimeout(r, 50));
+      } catch(e) {
+        console.error(`❌ Promo to ${uid}:`, e.message);
+      }
+    }
+    console.log(`✅ Promotion sent to ${uids.length} users`);
+  } catch(e) { console.error('❌ broadcastPromotion error:', e.message); }
+}
+
 async function checkPromotions() {
   try {
     const promos = (await pool.query('SELECT * FROM promotions WHERE active=true')).rows;
@@ -616,7 +847,6 @@ async function checkPromotions() {
     for (const p of promos) {
       if (!p.next_send_at) continue;
       if (now < Number(p.next_send_at)) continue;
-
       console.log(`📢 Sending interval promotion id=${p.id}`);
       try {
         await broadcastPromotion({
@@ -694,8 +924,6 @@ let callTimer = null;
 let countdownTimer = null;
 let announceTimer = null;
 let roundNumber = 1;
-
-// ══ GAME PERCENT (global for announceWinner) ══
 let gamePct = 80;
 
 console.log('🚀 Bingo Server Started!');
@@ -825,7 +1053,6 @@ async function addBotsIfNeeded() {
     if (!enabled) return;
 
     const minCards = (await getState('smartBot/minCards')) || 5;
-
     const allCards = (await getState('game/confirmedNumbers')) || {};
     const realPlayerCount = Object.keys(allCards).length;
     const botsNeeded = Math.max(0, minCards - realPlayerCount);
@@ -1007,7 +1234,6 @@ async function startAutoAnnounce(realBetsTotal, botBetsTotal) {
   }, 1000);
 }
 
-// ══ ANNOUNCE WINNER + SSE winner_popup broadcast ══
 async function announceWinner(realBetsTotal, botBetsTotal) {
   try {
     const data = await getState('game/pendingWinner');
@@ -1016,13 +1242,13 @@ async function announceWinner(realBetsTotal, botBetsTotal) {
     const share = Math.floor(prize / winners.length);
 
     let realWinShare = 0;
-    let botWinShare = 0;  // ← bot ድርሻ ብቻ ይቆጠራል
+    let botWinShare = 0;
     let botWon = false;
 
     for (let w of winners) {
       if (w.isBot) {
         botWon = true;
-        botWinShare += share;  // ← ቤቱ ያቆያል
+        botWinShare += share;
       } else {
         realWinShare += share;
         await pool.query('UPDATE users SET balance = balance + $1 WHERE uid=$2', [share, w.user]);
@@ -1046,10 +1272,6 @@ async function announceWinner(realBetsTotal, botBetsTotal) {
       );
     }
 
-    // ══════════════════════════════════════════════════
-    // ✅ SSE broadcast — winner (ለሁሉ game state ለ update)
-    // + winner_popup (ለ አሸናፊ client ብቻ popup ያሳያል)
-    // ══════════════════════════════════════════════════
     const winnerPayload = {
       type: 'winner',
       winners,
@@ -1060,8 +1282,6 @@ async function announceWinner(realBetsTotal, botBetsTotal) {
     };
     broadcast(winnerPayload);
 
-    // ── winner_popup: ለ real player አሸናፊዎች ብቻ ──
-    // (index.html ላይ userId ጋር ያወዳድራል — bot አይታይም)
     broadcast({
       type: 'winner_popup',
       winners: winners.filter(w => !w.isBot),
@@ -1079,29 +1299,21 @@ async function announceWinner(realBetsTotal, botBetsTotal) {
       await setState('game/status', { started: false, waitingRestart: true });
     }, 6000);
 
-    // ══ ANALYTICS ══
     await updateAnalytics('totalPaidOut', realWinShare);
     if (botWon) await updateAnalytics('botWinProfit', botWinShare);
 
-    // ✅ ትክክለኛ profit formula:
-    // ቤቱ ያገኘው = realBetsTotal (real players ብቻ)
-    // ቤቱ የከፈለ = realWinShare (player ካሸነፈ)
-    // ቤቱ ወጪ   = botBetsTotal (bot bet)
     const roundProfit = realBetsTotal - realWinShare - botBetsTotal;
     await updateAnalytics('totalProfit', roundProfit);
 
-    // ══ DAILY HISTORY — ሁሌ አዲስ ቀን ከ 0 ይጀምራል ══
     const todayStr = new Date().toISOString().split('T')[0];
     const history = (await getState('analytics/history')) || [];
     const todayIdx = history.findIndex(h => h.date === todayStr);
     if (todayIdx >= 0) {
-      // ቀኑ አለ → ይጨምራል
       history[todayIdx].profit = (history[todayIdx].profit || 0) + roundProfit;
       history[todayIdx].rounds = (history[todayIdx].rounds || 0) + 1;
       if (botWon) history[todayIdx].botWins = (history[todayIdx].botWins || 0) + 1;
       else history[todayIdx].playerWins = (history[todayIdx].playerWins || 0) + 1;
     } else {
-      // አዲስ ቀን → 0 ጀምሮ ይጨምራል
       history.push({
         date: todayStr,
         profit: roundProfit,
@@ -1110,77 +1322,10 @@ async function announceWinner(realBetsTotal, botBetsTotal) {
         playerWins: botWon ? 0 : 1
       });
     }
-    await setState('analytics/history', history.slice(-5)); // ← 5 ቀን ይቀራል
+    await setState('analytics/history', history.slice(-5));
 
     console.log(`✅ Round done! realBets:${realBetsTotal} botBets:${botBetsTotal} paidOut:${realWinShare} profit:${roundProfit} botWon:${botWon}`);
   } catch(e) { console.error('❌ announceWinner error:', e.message); }
-}
-
-// ══ PROMOTION BROADCAST ══
-const BOT_PY_URL = 'https://telegram-bingo-bot-production.up.railway.app/broadcast';
-
-async function broadcastPromotion(promoData) {
-  try {
-    const { text, photoBuffer, photoUrl, targetType, groupId } = promoData;
-
-    if (targetType === 'group' && groupId) {
-      const BOT_TOKEN = process.env.BOT_TOKEN || '';
-      const bodyData = JSON.stringify({ chat_id: groupId, text: text || '', parse_mode: 'HTML' });
-      await new Promise((resolve) => {
-        const options = {
-          hostname: 'api.telegram.org',
-          path: `/bot${BOT_TOKEN}/sendMessage`,
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(bodyData) }
-        };
-        const req = require('https').request(options, (res) => {
-          let d = '';
-          res.on('data', chunk => d += chunk);
-          res.on('end', () => { console.log('Group promo:', d.slice(0,80)); resolve(); });
-        });
-        req.on('error', (e) => { console.error('Group promo error:', e.message); resolve(); });
-        req.write(bodyData); req.end();
-      });
-    } else {
-      const url = new URL(BOT_PY_URL);
-      if (photoBuffer) {
-        const boundary = '----FormBoundary' + Date.now();
-        const body = Buffer.concat([
-          Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="text"\r\n\r\n${text || ''}\r\n`),
-          Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="promo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
-          photoBuffer,
-          Buffer.from(`\r\n--${boundary}--\r\n`)
-        ]);
-        await new Promise((resolve) => {
-          const options = { hostname: url.hostname, path: url.pathname, method: 'POST', headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length } };
-          const req = require('https').request(options, (r) => { let d=''; r.on('data',c=>d+=c); r.on('end',()=>{console.log('✅ Buffer broadcast:',d.slice(0,80));resolve();}); });
-          req.on('error', (e) => { console.error('❌',e.message); resolve(); });
-          req.write(body); req.end();
-        });
-      } else if (photoUrl) {
-        const boundary = '----FormBoundary' + Date.now();
-        const body = Buffer.concat([
-          Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="text"\r\n\r\n${text || ''}\r\n`),
-          Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo_url"\r\n\r\n${photoUrl}\r\n`),
-          Buffer.from(`--${boundary}--\r\n`)
-        ]);
-        await new Promise((resolve) => {
-          const options = { hostname: url.hostname, path: url.pathname, method: 'POST', headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length } };
-          const req = require('https').request(options, (r) => { let d=''; r.on('data',c=>d+=c); r.on('end',()=>{console.log('✅ URL broadcast:',d.slice(0,80));resolve();}); });
-          req.on('error', (e) => { console.error('❌',e.message); resolve(); });
-          req.write(body); req.end();
-        });
-      } else {
-        const postData = JSON.stringify({ text: text || '' });
-        await new Promise((resolve) => {
-          const options = { hostname: url.hostname, path: url.pathname, method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) } };
-          const req = require('https').request(options, (r) => { let d=''; r.on('data',c=>d+=c); r.on('end',()=>{console.log('✅ Text broadcast:',d.slice(0,80));resolve();}); });
-          req.on('error', (e) => { console.error('❌',e.message); resolve(); });
-          req.write(postData); req.end();
-        });
-      }
-    }
-  } catch(e) { console.error('❌ broadcastPromotion error:', e.message); }
 }
 
 async function scheduleNextRound() {
@@ -1497,6 +1642,68 @@ app.get('/fix-pending', async (req, res) => {
     );
     res.json({ ok: true });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
+});
+
+// ══ CLOUDINARY CLEANUP ══
+app.post('/clear-cloudinary', async (req, res) => {
+  try {
+    const auth = Buffer.from(`${CLOUDINARY_API_KEY}:${CLOUDINARY_API_SECRET}`).toString('base64');
+
+    // Active promos ውስጥ ያሉ photo URLs ይሰበስባል
+    const activePromos = await pool.query('SELECT photo_url FROM promotions WHERE active=true AND photo_url IS NOT NULL');
+    const activeUrls = new Set(activePromos.rows.map(r => r.photo_url).filter(Boolean));
+
+    // Cloudinary ላይ ያሉ images ሁሉ ያምጣል
+    const resources = await new Promise((resolve) => {
+      const options = {
+        hostname: 'api.cloudinary.com',
+        path: `/v1_1/${CLOUDINARY_CLOUD}/resources/image?max_results=100`,
+        method: 'GET',
+        headers: { 'Authorization': `Basic ${auth}` }
+      };
+      const req2 = https.request(options, (r) => {
+        let d = '';
+        r.on('data', c => d += c);
+        r.on('end', () => {
+          try { resolve(JSON.parse(d).resources || []); }
+          catch { resolve([]); }
+        });
+      });
+      req2.on('error', () => resolve([]));
+      req2.end();
+    });
+
+    // Active promos ውስጥ የሌሉ images ይሰርዛል
+    let deleted = 0;
+    for (const resource of resources) {
+      const url = resource.secure_url;
+      if (!activeUrls.has(url)) {
+        await new Promise((resolve) => {
+          const postData = JSON.stringify({ public_ids: [resource.public_id] });
+          const options = {
+            hostname: 'api.cloudinary.com',
+            path: `/v1_1/${CLOUDINARY_CLOUD}/resources/image/upload`,
+            method: 'DELETE',
+            headers: {
+              'Authorization': `Basic ${auth}`,
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(postData)
+            }
+          };
+          const req2 = https.request(options, (r) => { r.on('data', ()=>{}); r.on('end', resolve); });
+          req2.on('error', resolve);
+          req2.write(postData); req2.end();
+        });
+        deleted++;
+      }
+    }
+
+    console.log(`🗑️ Cloudinary cleanup: ${deleted} images deleted`);
+    res.json({ ok: true, deleted, total: resources.length, kept: resources.length - deleted });
+  } catch(e) {
+    console.error('❌ Cloudinary cleanup error:', e.message);
+    res.json({ ok: false, msg: e.message });
+  }
 });
 
 app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
