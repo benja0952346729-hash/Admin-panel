@@ -1401,7 +1401,6 @@ async function announceWinner(realBetsTotal, botBetsTotal) {
     await updateAnalytics('totalPaidOut', realWinShare);
 const roundHouseProfit = realBetsTotal - realWinShare;
 await updateAnalytics('houseProfit', roundHouseProfit);
-if (botWon) await updateAnalytics('houseProfit', botWinShare);
 await updateAnalytics('botWin', botWinShare);
 
     const todayStr = new Date().toISOString().split('T')[0];
@@ -1409,7 +1408,7 @@ await updateAnalytics('botWin', botWinShare);
     const todayIdx = history.findIndex(h => h.date === todayStr);
     if (todayIdx >= 0) {
       const roundHouseProfit = realBetsTotal - realWinShare;
-history[todayIdx].houseProfit = (history[todayIdx].houseProfit || 0) + roundHouseProfit + (botWon ? botWinShare : 0);
+history[todayIdx].houseProfit = (history[todayIdx].houseProfit || 0) + roundHouseProfit;
 history[todayIdx].botBet = (history[todayIdx].botBet || 0) + botBetsTotal;
 history[todayIdx].botWin = (history[todayIdx].botWin || 0) + botWinShare;
 history[todayIdx].rounds = (history[todayIdx].rounds || 0) + 1;
@@ -1419,7 +1418,7 @@ else history[todayIdx].playerWins = (history[todayIdx].playerWins || 0) + 1;
   const roundHouseProfit = realBetsTotal - realWinShare;
   history.push({
     date: todayStr,
-    houseProfit: roundHouseProfit + (botWon ? botWinShare : 0),
+    houseProfit: roundHouseProfit,
   botBet: botBetsTotal,
   botWin: botWinShare,
   rounds: 1,
