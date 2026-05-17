@@ -761,33 +761,47 @@ async function broadcastPromotion(promoData) {
 
     // ── Group ሲሆን ──
     if (targetType === 'group' && groupId) {
-  const bodyData = JSON.stringify({
-    chat_id: groupId,
-    text: text || '',
-    parse_mode: 'HTML',
-    reply_markup: {
-      inline_keyboard: [[
-        {
-          text: '🎮 Play Now',
-          url: 'https://t.me/Firstanywharebingobot'
-        }
-      ]]
-    }
+  let apiPath, bodyData;
+  if (photoUrl) {
+    apiPath = `/bot${BOT_TOKEN}/sendPhoto`;
+    bodyData = JSON.stringify({
+      chat_id: groupId,
+      photo: photoUrl,
+      caption: text || '',
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [[
+          { text: '🎮 Play Now', url: 'https://t.me/Firstanywharebingobot' }
+        ]]
+      }
+    });
+  } else {
+    apiPath = `/bot${BOT_TOKEN}/sendMessage`;
+    bodyData = JSON.stringify({
+      chat_id: groupId,
+      text: text || '',
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [[
+          { text: '🎮 Play Now', url: 'https://t.me/Firstanywharebingobot' }
+        ]]
+      }
+    });
+  }
+  await new Promise((resolve) => {
+    const opts = {
+      hostname: 'api.telegram.org',
+      path: apiPath,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(bodyData) }
+    };
+    const r2 = https.request(opts, (r) => { r.on('data', ()=>{}); r.on('end', resolve); });
+    r2.on('error', resolve);
+    r2.write(bodyData); r2.end();
   });
-      await new Promise((resolve) => {
-        const opts = {
-          hostname: 'api.telegram.org',
-          path: `/bot${BOT_TOKEN}/sendMessage`,
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(bodyData) }
-        };
-        const r2 = https.request(opts, (r) => { r.on('data', ()=>{}); r.on('end', resolve); });
-        r2.on('error', resolve);
-        r2.write(bodyData); r2.end();
-      });
-      console.log('✅ Group promotion sent!');
-      return;
-    }
+  console.log('✅ Group promotion sent!');
+  return;
+}
 
     // ── Bot Users ሁሉ ──
     const usersRes = await pool.query('SELECT uid FROM users WHERE is_bot = false');
