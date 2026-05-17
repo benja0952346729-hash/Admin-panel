@@ -761,7 +761,19 @@ async function broadcastPromotion(promoData) {
 
     // ── Group ሲሆን ──
     if (targetType === 'group' && groupId) {
-      const bodyData = JSON.stringify({ chat_id: groupId, text: text || '', parse_mode: 'HTML' });
+  const bodyData = JSON.stringify({
+    chat_id: groupId,
+    text: text || '',
+    parse_mode: 'HTML',
+    reply_markup: {
+      inline_keyboard: [[
+        {
+          text: '🎮 Play Now',
+          url: 'https://t.me/Firstanywharebingobot'
+        }
+      ]]
+    }
+  });
       await new Promise((resolve) => {
         const opts = {
           hostname: 'api.telegram.org',
@@ -785,16 +797,22 @@ async function broadcastPromotion(promoData) {
     for (const uid of uids) {
       try {
         if (photoBuffer) {
-          // Photo buffer ጋር
-          const boundary = '----FormBoundary' + Date.now();
-          const body = Buffer.concat([
-            Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${uid}\r\n`),
-            Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${text || ''}\r\n`),
-            Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="parse_mode"\r\n\r\nHTML\r\n`),
-            Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="promo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
-            photoBuffer,
-            Buffer.from(`\r\n--${boundary}--\r\n`)
-          ]);
+  // Photo buffer ጋር
+  const replyMarkup = JSON.stringify({
+    inline_keyboard: [[
+      { text: '🎮 Play Now', web_app: { url: 'https://game-production-7f86.up.railway.app/' } }
+    ]]
+  });
+  const boundary = '----FormBoundary' + Date.now();
+  const body = Buffer.concat([
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${uid}\r\n`),
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${text || ''}\r\n`),
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="parse_mode"\r\n\r\nHTML\r\n`),
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="reply_markup"\r\n\r\n${replyMarkup}\r\n`),
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="promo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
+    photoBuffer,
+    Buffer.from(`\r\n--${boundary}--\r\n`)
+  ]);
           await new Promise((resolve) => {
             const opts = {
               hostname: 'api.telegram.org',
@@ -810,13 +828,21 @@ async function broadcastPromotion(promoData) {
             r2.write(body); r2.end();
           });
         } else if (photoUrl) {
-          // Cloudinary photo URL ጋር
-          const bodyData = JSON.stringify({
-            chat_id: uid,
-            photo: photoUrl,
-            caption: text || '',
-            parse_mode: 'HTML'
-          });
+  // Cloudinary photo URL ጋር
+  const bodyData = JSON.stringify({
+    chat_id: uid,
+    photo: photoUrl,
+    caption: text || '',
+    parse_mode: 'HTML',
+    reply_markup: {
+      inline_keyboard: [[
+        {
+          text: '🎮 Play Now',
+          web_app: { url: 'https://game-production-7f86.up.railway.app/' }
+        }
+      ]]
+    }
+  });
           await new Promise((resolve) => {
             const opts = {
               hostname: 'api.telegram.org',
@@ -832,12 +858,20 @@ async function broadcastPromotion(promoData) {
             r2.write(bodyData); r2.end();
           });
         } else {
-          // Text ብቻ
-          const bodyData = JSON.stringify({
-            chat_id: uid,
-            text: text || '',
-            parse_mode: 'HTML'
-          });
+  // Text ብቻ
+  const bodyData = JSON.stringify({
+    chat_id: uid,
+    text: text || '',
+    parse_mode: 'HTML',
+    reply_markup: {
+      inline_keyboard: [[
+        {
+          text: '🎮 Play Now',
+          web_app: { url: 'https://game-production-7f86.up.railway.app/' }
+        }
+      ]]
+    }
+  });
           await new Promise((resolve) => {
             const opts = {
               hostname: 'api.telegram.org',
