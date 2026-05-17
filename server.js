@@ -183,6 +183,7 @@ app.get('/tts/winner-announce', async (req, res) => {
     res.send(response.buffer);
   } catch(e) { res.status(500).json({ error: 'TTS failed' }); }
 });
+
 app.get('/tts/congrats/:prize', async (req, res) => {
   const prize = req.params.prize;
   try {
@@ -201,6 +202,7 @@ app.get('/tts/congrats/:prize', async (req, res) => {
     res.send(response.buffer);
   } catch(e) { res.status(500).json({ error: 'TTS failed' }); }
 });
+
 app.get('/tts/bingo', async (req, res) => {
   try {
     const response = await new Promise((resolve, reject) => {
@@ -300,14 +302,12 @@ app.get('/game-state', async (req, res) => {
     flat['analytics/totalPaidOut']     = analyticsData['totalPaidOut']     || 0;
     flat['analytics/totalDeposits']    = analyticsData['totalDeposits']    || 0;
     flat['analytics/totalWithdrawals'] = analyticsData['totalWithdrawals'] || 0;
-    flat['analytics/houseCut']         = analyticsData['houseCut']         || 0;
-    flat['analytics/botWinProfit']     = analyticsData['botWinProfit']     || 0;
+    flat['analytics/houseProfit']      = analyticsData['houseProfit']      || 0;
     flat['analytics/botBet']           = analyticsData['botBet']           || 0;
+    flat['analytics/botWin']           = analyticsData['botWin']           || 0;
 
     const history = (await getState('analytics/history')) || [];
-    const totalProfit = history.reduce((sum, h) => sum + (h.profit || 0), 0);
-    flat['analytics/totalProfit'] = totalProfit;
-    flat['analytics/history']     = history;
+    flat['analytics/history'] = history;
 
     res.json(flat);
   } catch(e) { res.json({}); }
@@ -340,12 +340,8 @@ app.get('/promotions-list', async (req, res) => {
 app.post('/delete-promotion', async (req, res) => {
   try {
     const { id } = req.body;
-
-    // photo_url ያምጣል ከ Cloudinary ለ delete
     const r = await pool.query('SELECT photo_url FROM promotions WHERE id=$1', [id]);
     const photoUrl = r.rows[0]?.photo_url || '';
-
-    // Cloudinary ላይ ይሰርዛል
     if (photoUrl) {
       try {
         const match = photoUrl.match(/\/upload\/(?:v\d+\/)?(.+)\.[a-z]+$/i);
@@ -358,28 +354,20 @@ app.post('/delete-promotion', async (req, res) => {
               hostname: 'api.cloudinary.com',
               path: `/v1_1/${CLOUDINARY_CLOUD}/resources/image/upload`,
               method: 'DELETE',
-              headers: {
-                'Authorization': `Basic ${auth}`,
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(postData)
-              }
+              headers: { 'Authorization': `Basic ${auth}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) }
             };
             const req2 = https.request(options, (r2) => { r2.on('data', ()=>{}); r2.on('end', resolve); });
             req2.on('error', resolve);
             req2.write(postData); req2.end();
           });
-          console.log(`🗑️ Cloudinary deleted: ${publicId}`);
         }
       } catch(e) { console.error('❌ Cloudinary delete error:', e.message); }
     }
-
-    // DB ላይ ይሰርዛል
     await pool.query('DELETE FROM promotions WHERE id=$1', [id]);
     res.json({ ok: true });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
 
-// ══ SEND NOW PHOTO SAVE ══
 app.post('/save-promo-photo', multer({ storage: multer.memoryStorage() }).single('photo'), async (req, res) => {
   const photoBuffer = req.file ? req.file.buffer : null;
   if (!photoBuffer) return res.json({ ok: false, msg: '❌ Photo የለም!' });
@@ -396,11 +384,7 @@ app.post('/save-promo-photo', multer({ storage: multer.memoryStorage() }).single
         hostname: 'api.cloudinary.com',
         path: `/v1_1/${CLOUDINARY_CLOUD}/image/upload`,
         method: 'POST',
-        headers: {
-          'Content-Type': `multipart/form-data; boundary=${boundary}`,
-          'Content-Length': body.length,
-          'Authorization': `Basic ${auth}`
-        }
+        headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length, 'Authorization': `Basic ${auth}` }
       };
       const req2 = https.request(options, (r) => {
         let d = '';
@@ -410,8 +394,6 @@ app.post('/save-promo-photo', multer({ storage: multer.memoryStorage() }).single
       req2.on('error', () => resolve(''));
       req2.write(body); req2.end();
     });
-
-    // DB ውስጥ temp promo ያስቀምጣል (active=false, interval=0)
     const result = await pool.query(
       'INSERT INTO promotions(text,photo_url,target_type,interval_ms,active,created_at) VALUES($1,$2,$3,$4,false,$5) RETURNING id',
       ['__send_now__', photoUrl, 'bot', 0, Date.now()]
@@ -420,12 +402,9 @@ app.post('/save-promo-photo', multer({ storage: multer.memoryStorage() }).single
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
 
-// ══ DELETE SEND NOW PHOTO ══
 app.post('/delete-promo-photo', async (req, res) => {
   try {
     const { promoId, photoUrl } = req.body;
-
-    // Cloudinary ላይ ይሰርዛል
     if (photoUrl) {
       try {
         const match = photoUrl.match(/\/upload\/(?:v\d+\/)?(.+)\.[a-z]+$/i);
@@ -438,22 +417,15 @@ app.post('/delete-promo-photo', async (req, res) => {
               hostname: 'api.cloudinary.com',
               path: `/v1_1/${CLOUDINARY_CLOUD}/resources/image/upload`,
               method: 'DELETE',
-              headers: {
-                'Authorization': `Basic ${auth}`,
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(postData)
-              }
+              headers: { 'Authorization': `Basic ${auth}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) }
             };
             const req2 = https.request(options, (r2) => { r2.on('data', ()=>{}); r2.on('end', resolve); });
             req2.on('error', resolve);
             req2.write(postData); req2.end();
           });
-          console.log(`🗑️ Cloudinary deleted: ${publicId}`);
         }
       } catch(e) { console.error('❌ Cloudinary delete error:', e.message); }
     }
-
-    // DB ላይ ይሰርዛል
     if (promoId) await pool.query('DELETE FROM promotions WHERE id=$1', [promoId]);
     res.json({ ok: true });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
@@ -490,32 +462,21 @@ app.post('/withdrawal-action', async (req, res) => {
       (await pool.query("SELECT value FROM game_state WHERE key='bot/withdrawals'")).rows[0]?.value || '{}'
     );
     if (!allWd[key]) return res.json({ ok: false, msg: 'Not found' });
-
     allWd[key].status = action === 'approve' ? 'approved' : 'rejected';
     await setState('bot/withdrawals', allWd);
-
     if (action === 'approve') {
       await updateAnalytics('totalWithdrawals', amount);
-      await pool.query(
-        "UPDATE game_state SET value='0' WHERE key=$1",
-        [`users/${uid}/pending_withdrawal`]
-      );
+      await pool.query("UPDATE game_state SET value='0' WHERE key=$1", [`users/${uid}/pending_withdrawal`]);
       const wd = allWd[key];
       const method = wd?.method || 'ባንክ';
       const account = wd?.account || '—';
-      await pool.query(
-        'INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
-        [uid, `✅ ${amount} ብር በ ${method} ተላከ!\n📋 Account: ${account}`, Date.now()]
-      );
+      await pool.query('INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)', [uid, `✅ ${amount} ብር በ ${method} ተላከ!\n📋 Account: ${account}`, Date.now()]);
     } else {
       await pool.query('UPDATE users SET balance=balance+$1 WHERE uid=$2', [amount, uid]);
       const r = await pool.query('SELECT balance FROM users WHERE uid=$1', [uid]);
       const newBal = r.rows[0]?.balance || 0;
       broadcast({ type: 'balance', uid, balance: newBal });
-      await pool.query(
-        'INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
-        [uid, `❌ Withdrawal rejected — ${amount} ብር balance ላይ ተመለሰ!`, Date.now()]
-      );
+      await pool.query('INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)', [uid, `❌ Withdrawal rejected — ${amount} ብር balance ላይ ተመለሰ!`, Date.now()]);
     }
     res.json({ ok: true });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
@@ -524,9 +485,7 @@ app.post('/withdrawal-action', async (req, res) => {
 app.post('/add-agent', async (req, res) => {
   try {
     const { name, id_number } = req.body;
-    const agents = JSON.parse(
-      (await pool.query("SELECT value FROM game_state WHERE key='agents'")).rows[0]?.value || '{}'
-    );
+    const agents = JSON.parse((await pool.query("SELECT value FROM game_state WHERE key='agents'")).rows[0]?.value || '{}');
     agents[name] = { id_number };
     await setState('agents', agents);
     res.json({ ok: true });
@@ -536,9 +495,7 @@ app.post('/add-agent', async (req, res) => {
 app.post('/delete-agent', async (req, res) => {
   try {
     const { name } = req.body;
-    const agents = JSON.parse(
-      (await pool.query("SELECT value FROM game_state WHERE key='agents'")).rows[0]?.value || '{}'
-    );
+    const agents = JSON.parse((await pool.query("SELECT value FROM game_state WHERE key='agents'")).rows[0]?.value || '{}');
     delete agents[name];
     await setState('agents', agents);
     res.json({ ok: true });
@@ -562,9 +519,7 @@ app.post('/remove-bots', async (req, res) => {
 
 app.get('/unread-notifications', async (req, res) => {
   try {
-    const r = await pool.query(
-      'SELECT id, uid, message FROM notifications WHERE read=false ORDER BY time ASC LIMIT 50'
-    );
+    const r = await pool.query('SELECT id, uid, message FROM notifications WHERE read=false ORDER BY time ASC LIMIT 50');
     res.json(r.rows);
   } catch(e) { res.json([]); }
 });
@@ -600,7 +555,6 @@ app.get('/get-balance', async (req, res) => {
   } catch(e) { res.json({ balance: 0 }); }
 });
 
-// ══ WITHDRAWAL TOGGLE ══
 app.get('/withdrawal-status', async (req, res) => {
   try {
     const enabled = (await getState('settings/withdrawal_enabled')) ?? true;
@@ -617,7 +571,6 @@ app.post('/withdrawal-toggle', async (req, res) => {
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
 
-// ══ CLEAR ANALYTICS ══
 app.post('/clear-analytics', async (req, res) => {
   try {
     await pool.query('DELETE FROM analytics');
@@ -694,11 +647,7 @@ app.post('/create-interval-promotion', multer({ storage: multer.memoryStorage() 
   const { text, targetType, groupId, intervalMs } = req.body;
   const photoBuffer = req.file ? req.file.buffer : null;
   if (!text && !photoBuffer) return res.json({ ok: false, msg: '❌ Message ወይም Photo ያስፈልጋል!' });
-
-  // ወዲያውኑ response ይላካል
   res.json({ ok: true, msg: '✅ Interval promotion ተጀምሯል!' });
-
-  // Background ላይ Cloudinary upload + DB save ያደርጋል
   try {
     let photoUrl = '';
     if (photoBuffer) {
@@ -714,11 +663,7 @@ app.post('/create-interval-promotion', multer({ storage: multer.memoryStorage() 
           hostname: 'api.cloudinary.com',
           path: `/v1_1/${CLOUDINARY_CLOUD}/image/upload`,
           method: 'POST',
-          headers: {
-            'Content-Type': `multipart/form-data; boundary=${boundary}`,
-            'Content-Length': body.length,
-            'Authorization': `Basic ${auth}`
-          }
+          headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length, 'Authorization': `Basic ${auth}` }
         };
         const request = require('https').request(options, (r) => {
           let d = '';
@@ -736,58 +681,38 @@ app.post('/create-interval-promotion', multer({ storage: multer.memoryStorage() 
     console.log('✅ Interval promo created!');
   } catch(e) { console.error('❌ create-interval-promotion error:', e.message); }
 });
+
 app.post('/send-promotion', multer({ storage: multer.memoryStorage() }).single('photo'), async (req, res) => {
   const { text, targetType, groupId, photoUrl } = req.body;
   const photoBuffer = req.file ? req.file.buffer : null;
   if (!text && !photoBuffer && !photoUrl)
     return res.json({ ok: false, msg: '❌ Message ወይም Photo ያስፈልጋል!' });
-
-  // ወዲያውኑ response — timeout አይሆንም
   res.json({ ok: true, msg: '✅ Promotion እየተላከ ነው...' });
-
-  // Background ላይ ይሰራል
   broadcastPromotion({ text, photoBuffer, photoUrl, targetType, groupId })
     .catch(e => console.error('❌ broadcastPromotion:', e.message));
 });
 
-// ══ PROMOTION BROADCAST — ቀጥታ Telegram API ══
 async function broadcastPromotion(promoData) {
   try {
     const { text, photoBuffer, photoUrl, targetType, groupId } = promoData;
     const BOT_TOKEN = process.env.BOT_TOKEN || '';
-
-    if (!BOT_TOKEN) {
-      console.error('❌ BOT_TOKEN not set!');
-      return;
-    }
-
-    // ── Group ሲሆን ──
+    if (!BOT_TOKEN) { console.error('❌ BOT_TOKEN not set!'); return; }
     if (targetType === 'group' && groupId) {
       const bodyData = JSON.stringify({ chat_id: groupId, text: text || '', parse_mode: 'HTML' });
       await new Promise((resolve) => {
-        const opts = {
-          hostname: 'api.telegram.org',
-          path: `/bot${BOT_TOKEN}/sendMessage`,
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(bodyData) }
-        };
+        const opts = { hostname: 'api.telegram.org', path: `/bot${BOT_TOKEN}/sendMessage`, method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(bodyData) } };
         const r2 = https.request(opts, (r) => { r.on('data', ()=>{}); r.on('end', resolve); });
-        r2.on('error', resolve);
-        r2.write(bodyData); r2.end();
+        r2.on('error', resolve); r2.write(bodyData); r2.end();
       });
       console.log('✅ Group promotion sent!');
       return;
     }
-
-    // ── Bot Users ሁሉ ──
     const usersRes = await pool.query('SELECT uid FROM users WHERE is_bot = false');
     const uids = usersRes.rows.map(r => r.uid);
     console.log(`📢 Sending promotion to ${uids.length} users...`);
-
     for (const uid of uids) {
       try {
         if (photoBuffer) {
-          // Photo buffer ጋር
           const boundary = '----FormBoundary' + Date.now();
           const body = Buffer.concat([
             Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${uid}\r\n`),
@@ -798,68 +723,27 @@ async function broadcastPromotion(promoData) {
             Buffer.from(`\r\n--${boundary}--\r\n`)
           ]);
           await new Promise((resolve) => {
-            const opts = {
-              hostname: 'api.telegram.org',
-              path: `/bot${BOT_TOKEN}/sendPhoto`,
-              method: 'POST',
-              headers: {
-                'Content-Type': `multipart/form-data; boundary=${boundary}`,
-                'Content-Length': body.length
-              }
-            };
+            const opts = { hostname: 'api.telegram.org', path: `/bot${BOT_TOKEN}/sendPhoto`, method: 'POST', headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length } };
             const r2 = https.request(opts, (r) => { r.on('data', ()=>{}); r.on('end', resolve); });
-            r2.on('error', resolve);
-            r2.write(body); r2.end();
+            r2.on('error', resolve); r2.write(body); r2.end();
           });
         } else if (photoUrl) {
-          // Cloudinary photo URL ጋር
-          const bodyData = JSON.stringify({
-            chat_id: uid,
-            photo: photoUrl,
-            caption: text || '',
-            parse_mode: 'HTML'
-          });
+          const bodyData = JSON.stringify({ chat_id: uid, photo: photoUrl, caption: text || '', parse_mode: 'HTML' });
           await new Promise((resolve) => {
-            const opts = {
-              hostname: 'api.telegram.org',
-              path: `/bot${BOT_TOKEN}/sendPhoto`,
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(bodyData)
-              }
-            };
+            const opts = { hostname: 'api.telegram.org', path: `/bot${BOT_TOKEN}/sendPhoto`, method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(bodyData) } };
             const r2 = https.request(opts, (r) => { r.on('data', ()=>{}); r.on('end', resolve); });
-            r2.on('error', resolve);
-            r2.write(bodyData); r2.end();
+            r2.on('error', resolve); r2.write(bodyData); r2.end();
           });
         } else {
-          // Text ብቻ
-          const bodyData = JSON.stringify({
-            chat_id: uid,
-            text: text || '',
-            parse_mode: 'HTML'
-          });
+          const bodyData = JSON.stringify({ chat_id: uid, text: text || '', parse_mode: 'HTML' });
           await new Promise((resolve) => {
-            const opts = {
-              hostname: 'api.telegram.org',
-              path: `/bot${BOT_TOKEN}/sendMessage`,
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(bodyData)
-              }
-            };
+            const opts = { hostname: 'api.telegram.org', path: `/bot${BOT_TOKEN}/sendMessage`, method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(bodyData) } };
             const r2 = https.request(opts, (r) => { r.on('data', ()=>{}); r.on('end', resolve); });
-            r2.on('error', resolve);
-            r2.write(bodyData); r2.end();
+            r2.on('error', resolve); r2.write(bodyData); r2.end();
           });
         }
-        // Rate limit ለማስቀረት 50ms delay
         await new Promise(r => setTimeout(r, 50));
-      } catch(e) {
-        console.error(`❌ Promo to ${uid}:`, e.message);
-      }
+      } catch(e) { console.error(`❌ Promo to ${uid}:`, e.message); }
     }
     console.log(`✅ Promotion sent to ${uids.length} users`);
   } catch(e) { console.error('❌ broadcastPromotion error:', e.message); }
@@ -874,29 +758,15 @@ async function checkPromotions() {
       if (now < Number(p.next_send_at)) continue;
       console.log(`📢 Sending interval promotion id=${p.id}`);
       try {
-        await broadcastPromotion({
-          text: p.text || '',
-          photoBuffer: null,
-          photoUrl: p.photo_url || '',
-          targetType: p.target_type || 'bot',
-          groupId: p.group_id || ''
-        });
-        await pool.query(
-          'UPDATE promotions SET next_send_at=$1, last_sent_at=$2 WHERE id=$3',
-          [now + (Number(p.interval_ms) || 3600000), now, p.id]
-        );
+        await broadcastPromotion({ text: p.text || '', photoBuffer: null, photoUrl: p.photo_url || '', targetType: p.target_type || 'bot', groupId: p.group_id || '' });
+        await pool.query('UPDATE promotions SET next_send_at=$1, last_sent_at=$2 WHERE id=$3', [now + (Number(p.interval_ms) || 3600000), now, p.id]);
         console.log(`✅ Promotion sent! id=${p.id}`);
       } catch(e) {
         console.error('❌ Promotion send error:', e.message);
-        await pool.query(
-          'UPDATE promotions SET next_send_at=$1 WHERE id=$2',
-          [now + (Number(p.interval_ms) || 3600000), p.id]
-        );
+        await pool.query('UPDATE promotions SET next_send_at=$1 WHERE id=$2', [now + (Number(p.interval_ms) || 3600000), p.id]);
       }
     }
-  } catch(e) {
-    console.error('❌ checkPromotions error:', e.message);
-  }
+  } catch(e) { console.error('❌ checkPromotions error:', e.message); }
 }
 
 setInterval(checkPromotions, 60 * 1000);
@@ -910,33 +780,26 @@ app.post('/confirm-card', async (req, res) => {
     const balRes = await pool.query('SELECT balance FROM users WHERE uid=$1', [userId]);
     const bal = balRes.rows.length ? Number(balRes.rows[0].balance) : 0;
     if (bal < bet) return res.json({ ok: false, msg: '❌ Balance አንስተኛ ነው!' });
-
     const status = await getState('game/status');
     if (status?.started) return res.json({ ok: false, msg: '❌ Game ጀምሯል!' });
-
     const allCards = (await getState('game/confirmedNumbers')) || {};
     const myCards = Object.values(allCards).filter(v => String(v) === String(userId));
     if (myCards.length >= 10) return res.json({ ok: false, msg: '❌ ከ 10 ካርድ በላይ መያዝ አይቻልም!' });
     if (allCards[cardId]) return res.json({ ok: false, msg: '❌ Card ተይዟል!' });
-
     allCards[cardId] = userId;
     await setState('game/confirmedNumbers', allCards);
     await pool.query('UPDATE users SET balance = balance - $1 WHERE uid=$2', [bet, userId]);
-
     const total = Object.keys(allCards).length;
     const pct = (await getState('game/percent')) || 80;
     const prize = Math.floor(bet * total * (pct / 100));
     await setState('game/prize', prize);
     await setState('game/total', bet * total);
-
     await updateAnalytics('totalCollected', bet);
-
     const currentBet = await getState('game/bet');
     const allC = (await getState('game/confirmedNumbers')) || {};
     const totalCards = Object.keys(allC).length;
     const totalPlayers = new Set(Object.values(allC)).size;
     broadcast({ type: 'card_taken', cardId, userId, prize, bet: currentBet, totalCards, totalPlayers });
-
     return res.json({ ok: true, msg: '✅ Card confirmed!' });
   } catch(e) { return res.json({ ok: false, msg: 'Error: ' + e.message }); }
 });
@@ -961,12 +824,13 @@ function getLetter(n) {
   return 'O';
 }
 
-function hashSeed(n){
+function hashSeed(n) {
   let h = n * 2654435761;
   h = ((h >>> 16) ^ h) * 0x45d9f3b;
   h = ((h >>> 16) ^ h) * 0x45d9f3b;
   return ((h >>> 16) ^ h) >>> 0;
 }
+
 function generateBoard(seed) {
   function sr(s) { let x = Math.sin(s) * 10000; return x - Math.floor(x); }
   function getNums(min, max, s) {
@@ -1000,10 +864,7 @@ function checkWin(board, called) {
 }
 
 function wouldCloseColumnSoon(n, allBoards, called) {
-  const colIndices = [
-    [0,5,10,15,20], [1,6,11,16,21], [2,7,12,17,22],
-    [3,8,13,18,23], [4,9,14,19,24],
-  ];
+  const colIndices = [[0,5,10,15,20],[1,6,11,16,21],[2,7,12,17,22],[3,8,13,18,23],[4,9,14,19,24]];
   const simulatedCalled = [...called, n];
   for (let cardId in allBoards) {
     const board = allBoards[cardId];
@@ -1068,10 +929,8 @@ async function startAutoGame() {
     await setState('game/status', { started: true, autoStarted: true });
     await setState('autoMode/phase', 'playing');
     console.log('🎮 Game Started!');
-
     const callSpeed = (await getState('autoMode/callSpeed')) || 6000;
     await addBotsIfNeeded();
-
     setTimeout(() => { autoCallNumber(callSpeed); }, 2000);
   } catch(e) {
     console.error('❌ startAutoGame error:', e.message);
@@ -1083,16 +942,13 @@ async function addBotsIfNeeded() {
   try {
     const enabled = await getState('smartBot/enabled');
     if (!enabled) return;
-
     const minCards = (await getState('smartBot/minCards')) || 5;
     const allCards = (await getState('game/confirmedNumbers')) || {};
     const realPlayerCount = Object.keys(allCards).length;
     const botsNeeded = Math.max(0, minCards - realPlayerCount);
     if (botsNeeded === 0) return;
-
     const bet = (await getState('game/bet')) || 0;
     const pct = (await getState('game/percent')) || 80;
-
     for (let i = 0; i < botsNeeded; i++) {
       const botId = `bot_${Date.now()}_${i}`;
       const botName = `Bot${Math.floor(Math.random() * 9000) + 1000}`;
@@ -1106,14 +962,17 @@ async function addBotsIfNeeded() {
         await pool.query('UPDATE users SET balance = balance - $1 WHERE uid=$2', [bet, botId]);
       }
     }
-
     await setState('game/confirmedNumbers', allCards);
     const total = Object.keys(allCards).length;
     const newTotal = bet * total;
     const newPrize = Math.floor(newTotal * (pct / 100));
     await setState('game/prize', newPrize);
     await setState('game/total', newTotal);
+
+    // ══ ANALYTICS: Step 1 — Bot bet ሲያደርግ house profit ይቀነሳል ══
     await updateAnalytics('botBet', bet * botsNeeded);
+    await updateAnalytics('houseProfit', -(bet * botsNeeded));
+
     console.log(`🤖 Added ${botsNeeded} bots. Total cards: ${total}, prize: ${newPrize}`);
   } catch(e) { console.error('❌ addBotsIfNeeded error:', e.message); }
 }
@@ -1121,20 +980,16 @@ async function addBotsIfNeeded() {
 async function autoCallNumber(speed) {
   if (!autoModeOn) return;
   clearInterval(callTimer);
-
   const allCards = (await getState('game/confirmedNumbers')) || {};
   console.log(`📋 Cards at game start: ${Object.keys(allCards).length}`);
-
   if (Object.keys(allCards).length === 0) {
     console.log('⚠️ No cards found! Skipping to next round...');
     await scheduleNextRound();
     return;
   }
-
   const usersSnap = await pool.query('SELECT uid, display, is_bot FROM users');
   const allUsers = {};
   usersSnap.rows.forEach(r => { allUsers[r.uid] = { display: r.display, is_bot: r.is_bot }; });
-
   const cardInfoMap = {}, realCards = [], botCards = [];
   for (let cardId in allCards) {
     const uid = allCards[cardId];
@@ -1145,55 +1000,33 @@ async function autoCallNumber(speed) {
     if (isBot) botCards.push(entry);
     else realCards.push(entry);
   }
-
   console.log(`🎮 Real cards: ${realCards.length}, Bot cards: ${botCards.length}`);
-
   const bet = (await getState('game/bet')) || 0;
   gamePct = (await getState('game/percent')) || 80;
   const realBetsTotal = bet * realCards.length;
   const botBetsTotal  = bet * botCards.length;
-
   const totalCards = Object.keys(allCards).length;
   const prize = Math.floor(bet * totalCards * (gamePct / 100));
   await setState('game/prize', prize);
-
   const botWinPercent = (await getState('autoMode/botWinPercent')) ?? 50;
   const roll = Math.floor(Math.random() * 100) + 1;
   let targetCard = null;
   if (roll <= botWinPercent) {
-    targetCard = botCards.length > 0
-      ? botCards[Math.floor(Math.random() * botCards.length)]
-      : realCards.length > 0 ? realCards[Math.floor(Math.random() * realCards.length)] : null;
+    targetCard = botCards.length > 0 ? botCards[Math.floor(Math.random() * botCards.length)] : realCards.length > 0 ? realCards[Math.floor(Math.random() * realCards.length)] : null;
   } else {
-    targetCard = realCards.length > 0
-      ? realCards[Math.floor(Math.random() * realCards.length)]
-      : botCards.length > 0 ? botCards[Math.floor(Math.random() * botCards.length)] : null;
+    targetCard = realCards.length > 0 ? realCards[Math.floor(Math.random() * realCards.length)] : botCards.length > 0 ? botCards[Math.floor(Math.random() * botCards.length)] : null;
   }
-
-  if (!targetCard) {
-    console.log('⚠️ No target card — scheduling next round');
-    await scheduleNextRound();
-    return;
-  }
-
+  if (!targetCard) { console.log('⚠️ No target card — scheduling next round'); await scheduleNextRound(); return; }
   const neededNums = generateBoard(hashSeed(Number(targetCard.cardId))).filter(n => n !== 'FREE');
-const allBoards = {};
-for (let cardId in cardInfoMap) allBoards[cardId] = generateBoard(hashSeed(Number(cardId)));
-
+  const allBoards = {};
+  for (let cardId in cardInfoMap) allBoards[cardId] = generateBoard(hashSeed(Number(cardId)));
   callTimer = setInterval(async () => {
     try {
       if (!autoModeOn) { clearInterval(callTimer); return; }
-
       const pend = await getState('game/pendingWinner');
-      if (pend && !pend.announced) {
-        clearInterval(callTimer);
-        startAutoAnnounce(realBetsTotal, botBetsTotal);
-        return;
-      }
-
+      if (pend && !pend.announced) { clearInterval(callTimer); startAutoAnnounce(realBetsTotal, botBetsTotal); return; }
       const used = new Set(calledNumbers);
       const remaining = [...Array(75)].map((_, i) => i + 1).filter(n => !used.has(n));
-
       if (!remaining.length) {
         clearInterval(callTimer);
         for (let cardId in allCards) {
@@ -1202,42 +1035,31 @@ for (let cardId in cardInfoMap) allBoards[cardId] = generateBoard(hashSeed(Numbe
           await pool.query('UPDATE users SET balance = balance + $1 WHERE uid=$2', [bet, uid]);
           const r = await pool.query('SELECT balance FROM users WHERE uid=$1', [uid]);
           broadcast({ type: 'balance', uid, balance: r.rows[0]?.balance || 0 });
-          await pool.query(
-            'INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
-            [uid, `⚠️ Game ሳይጠናቀቅ ተዘጋ — ${bet} ብር ተመለሰ!`, Date.now()]
-          );
+          await pool.query('INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)', [uid, `⚠️ Game ሳይጠናቀቅ ተዘጋ — ${bet} ብር ተመለሰ!`, Date.now()]);
         }
         await setState('game/announcement', { type: 'no_winner', message: 'ምንም አሸናፊ አልተገኘም', time: Date.now() });
         await scheduleNextRound();
         return;
       }
-
       const neededRemaining = remaining.filter(n => neededNums.includes(n) && !calledNumbers.includes(n));
       let safeRemaining = remaining.filter(n => !wouldCloseColumnSoon(n, allBoards, calledNumbers));
       if (safeRemaining.length === 0) safeRemaining = remaining;
       const safeNeeded = neededRemaining.filter(n => safeRemaining.includes(n));
-
       let n;
       const noBotBias = (await getState('autoMode/noBotBias')) ?? 0.50;
       const rand = Math.random();
-      if (safeNeeded.length > 0 && rand < noBotBias)
-        n = safeNeeded[Math.floor(Math.random() * safeNeeded.length)];
-      else if (safeRemaining.length > 0)
-        n = safeRemaining[Math.floor(Math.random() * safeRemaining.length)];
-      else
-        n = remaining[Math.floor(Math.random() * remaining.length)];
-
+      if (safeNeeded.length > 0 && rand < noBotBias) n = safeNeeded[Math.floor(Math.random() * safeNeeded.length)];
+      else if (safeRemaining.length > 0) n = safeRemaining[Math.floor(Math.random() * safeRemaining.length)];
+      else n = remaining[Math.floor(Math.random() * remaining.length)];
       calledNumbers.push(n);
       const called = (await getState('game/calledNumbers')) || [];
       called.push(n);
       await setState('game/calledNumbers', called);
       console.log(`📢 ${getLetter(n)}${n}`);
-
       const winners = [];
       for (let cardId in allBoards)
         if (checkWin(allBoards[cardId], calledNumbers))
           winners.push({ ...cardInfoMap[cardId], time: Date.now() });
-
       if (winners.length > 0) {
         clearInterval(callTimer);
         console.log(`🏆 Winner found after ${calledNumbers.length} calls`);
@@ -1304,94 +1126,10 @@ async function announceWinner(realBetsTotal, botBetsTotal) {
       );
     }
 
-    const winnerPayload = {
-      type: 'winner',
-      winners,
-      prize,
-      share,
-      calledNumbers,
-      time: Date.now()
-    };
-    broadcast(winnerPayload);
-
-    broadcast({
-      type: 'winner_popup',
-      winners: winners.filter(w => !w.isBot),
-      share,
-      prize,
-      calledNumbers,
-      time: Date.now()
-    });
+    broadcast({ type: 'winner', winners, prize, share, calledNumbers, time: Date.now() });
+    broadcast({ type: 'winner_popup', winners: winners.filter(w => !w.isBot), share, prize, calledNumbers, time: Date.now() });
 
     await setState('game/announcement', { type: 'winner', winners, prize, share, time: Date.now(), calledNumbers });
-    // ══ TELEGRAM GROUP WINNER ANNOUNCE ══
-    try {
-      const BOT_TOKEN = process.env.BOT_TOKEN || '';
-      const GROUP_ID = '-1003570659417';
-
-      if (BOT_TOKEN && GROUP_ID) {
-        const winnerLines = winners.map(w =>
-          `🏆 <b>${w.displayName}</b>`
-        ).join('\n');
-
-        const msg = [
-          `🎉 <b>Round ${roundNumber} — አሸናፊ ተገኘ!</b>`,
-          ``,
-          winnerLines,
-          ``,
-          `💰 Prize: <b>${share} ብር</b>`,
-          `🔢 Numbers Called: <b>${calledNumbers.length}</b>`,
-          `🕐 ${new Date().toLocaleTimeString('am-ET')}`,
-          ``,
-          `🎮 ጨዋታ ለመቀጠል Bot ይጠቀሙ!`
-        ].join('\n');
-
- const bodyData = JSON.stringify({
-  chat_id: GROUP_ID,
-  text: msg,
-  parse_mode: 'HTML',
-  reply_markup: {
-    inline_keyboard: [[
-      {
-        text: '🎮 Play Now',
-        url: 'https://t.me/Firstanywharebingobot'
-      }
-    ]]
-  }
-});
-
-        await new Promise((resolve) => {
-          const opts = {
-            hostname: 'api.telegram.org',
-            path: `/bot${BOT_TOKEN}/sendMessage`,
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Content-Length': Buffer.byteLength(bodyData)
-            }
-          };
-          const r2 = https.request(opts, (r) => {
-            let d = '';
-            r.on('data', c => d += c);
-            r.on('end', () => {
-              console.log('📢 Group announce sent:', d.slice(0, 120));
-              resolve();
-            });
-          });
-          r2.on('error', (e) => {
-            console.error('❌ Group announce error:', e.message);
-            resolve();
-          });
-          r2.write(bodyData);
-          r2.end();
-        });
-
-        console.log('✅ Winner announced to Telegram group!');
-      }
-    } catch(e) {
-      console.error('❌ Telegram group announce error:', e.message);
-    }
-    // ══ END TELEGRAM GROUP ANNOUNCE ══
     await setState('game/paid', true);
     await setState('game/pendingWinner', { ...data, announced: true });
 
@@ -1399,32 +1137,48 @@ async function announceWinner(realBetsTotal, botBetsTotal) {
       await setState('game/status', { started: false, waitingRestart: true });
     }, 6000);
 
+    // ══ ANALYTICS ══
     await updateAnalytics('totalPaidOut', realWinShare);
-    if (botWon) await updateAnalytics('botWinProfit', botWinShare);
 
-    const roundProfit = realBetsTotal - realWinShare - botBetsTotal;
-    await updateAnalytics('totalProfit', roundProfit);
+    // Step 2: House cut (total × house%) ይጨመራል
+    const totalBets = realBetsTotal + botBetsTotal;
+    const houseCut = totalBets * ((100 - gamePct) / 100);
+    await updateAnalytics('houseProfit', houseCut);
 
+    // Step 3: Bot ካሸነፈ → bot prize house profit ላይ ይጨመራል
+    if (botWon) await updateAnalytics('houseProfit', botWinShare);
+
+    // Bot win tracking
+    await updateAnalytics('botWin', botWinShare);
+
+    // House profit this round = realBets - realWinShare
+    const roundHouseProfit = realBetsTotal - realWinShare;
+
+    // Daily history
     const todayStr = new Date().toISOString().split('T')[0];
     const history = (await getState('analytics/history')) || [];
     const todayIdx = history.findIndex(h => h.date === todayStr);
     if (todayIdx >= 0) {
-      history[todayIdx].profit = (history[todayIdx].profit || 0) + roundProfit;
-      history[todayIdx].rounds = (history[todayIdx].rounds || 0) + 1;
-      if (botWon) history[todayIdx].botWins = (history[todayIdx].botWins || 0) + 1;
-      else history[todayIdx].playerWins = (history[todayIdx].playerWins || 0) + 1;
+      history[todayIdx].houseProfit  = (history[todayIdx].houseProfit  || 0) + roundHouseProfit + (botWon ? botWinShare : 0);
+      history[todayIdx].botBet       = (history[todayIdx].botBet       || 0) + botBetsTotal;
+      history[todayIdx].botWin       = (history[todayIdx].botWin       || 0) + botWinShare;
+      history[todayIdx].rounds       = (history[todayIdx].rounds       || 0) + 1;
+      if (botWon) history[todayIdx].botWins    = (history[todayIdx].botWins    || 0) + 1;
+      else        history[todayIdx].playerWins = (history[todayIdx].playerWins || 0) + 1;
     } else {
       history.push({
         date: todayStr,
-        profit: roundProfit,
+        houseProfit: roundHouseProfit + (botWon ? botWinShare : 0),
+        botBet:      botBetsTotal,
+        botWin:      botWinShare,
         rounds: 1,
-        botWins: botWon ? 1 : 0,
-        playerWins: botWon ? 0 : 1
+        botWins:     botWon ? 1 : 0,
+        playerWins:  botWon ? 0 : 1
       });
     }
-    await setState('analytics/history', history.slice(-5));
+    await setState('analytics/history', history.slice(-30));
 
-    console.log(`✅ Round done! realBets:${realBetsTotal} botBets:${botBetsTotal} paidOut:${realWinShare} profit:${roundProfit} botWon:${botWon}`);
+    console.log(`✅ Round done! realBets:${realBetsTotal} botBets:${botBetsTotal} paidOut:${realWinShare} houseCut:${houseCut} botWon:${botWon}`);
   } catch(e) { console.error('❌ announceWinner error:', e.message); }
 }
 
@@ -1439,26 +1193,21 @@ async function scheduleNextRound() {
       await setState('autoMode/round', roundNumber);
       console.log('🔄 Daily Reset:', todayStr);
     }
-
     roundNumber++;
     await setState('autoMode/round', roundNumber);
     await setState('game/calledNumbers', []);
     await setState('game/status', { started: false });
     await setState('game/winners', null);
-
     setTimeout(async () => {
       await setState('game/pendingWinner', null);
       await setState('game/announcement', null);
     }, 10000);
-
     await setState('game/paid', false);
     await setState('game/confirmedNumbers', {});
     await setState('game/prize', 0);
     await setState('game/total', 0);
     calledNumbers = [];
-
     await pool.query('DELETE FROM users WHERE is_bot = true');
-
     await setState('autoMode/phase', 'countdown');
     setTimeout(async () => { if (autoModeOn) await startAutoCountdown(); }, 3000);
   } catch(e) {
@@ -1477,11 +1226,8 @@ setTimeout(async () => {
       roundNumber = (await getState('autoMode/round')) || 1;
       gamePct = (await getState('game/percent')) || 80;
       const gameStatus = await getState('game/status');
-      if (gameStatus?.started) {
-        await scheduleNextRound();
-      } else {
-        await startAutoCountdown();
-      }
+      if (gameStatus?.started) { await scheduleNextRound(); }
+      else { await startAutoCountdown(); }
     }
   } catch(e) { console.error('❌ Restore error:', e.message); }
 }, 3000);
@@ -1491,7 +1237,6 @@ setInterval(async () => {
     await pool.query('DELETE FROM notifications WHERE time < $1', [Date.now() - (7 * 24 * 60 * 60 * 1000)]);
     await pool.query(`DELETE FROM all_winners WHERE id NOT IN (SELECT id FROM all_winners ORDER BY time DESC LIMIT 500)`);
     await pool.query('DELETE FROM promotions WHERE active=false AND created_at < $1', [Date.now() - (30 * 24 * 60 * 60 * 1000)]);
-
     const lastReset = (await getState('analytics/lastFullReset')) || 0;
     const fiveDays = 5 * 24 * 60 * 60 * 1000;
     if (Date.now() - lastReset >= fiveDays) {
@@ -1500,7 +1245,6 @@ setInterval(async () => {
       await setState('analytics/lastFullReset', Date.now());
       console.log('🔄 Analytics full reset (5 days)');
     }
-
     console.log('✅ Auto cleanup done');
   } catch(e) { console.error('Cleanup error:', e.message); }
 }, 24 * 60 * 60 * 1000);
@@ -1532,10 +1276,7 @@ app.post('/admin/set-settings', async (req, res) => {
   try {
     const { bet, percent, cdMinutes, callSpeed, botWinPercent, botMinCards, noBotBias } = req.body;
     if (bet !== undefined) await setState('game/bet', Number(bet));
-    if (percent !== undefined) {
-      await setState('game/percent', Number(percent));
-      gamePct = Number(percent);
-    }
+    if (percent !== undefined) { await setState('game/percent', Number(percent)); gamePct = Number(percent); }
     if (cdMinutes !== undefined) await setState('autoMode/cdMinutes', Number(cdMinutes));
     if (callSpeed !== undefined) await setState('autoMode/callSpeed', Number(callSpeed));
     if (botWinPercent !== undefined) await setState('autoMode/botWinPercent', Number(botWinPercent));
@@ -1571,18 +1312,14 @@ app.post('/withdrawal-accept', async (req, res) => {
   try {
     const { key, agentId } = req.body;
     if (!key || !agentId) return res.json({ ok: false, msg: 'Missing data' });
-    const allWd = JSON.parse(
-      (await pool.query("SELECT value FROM game_state WHERE key='bot/withdrawals'")).rows[0]?.value || '{}'
-    );
+    const allWd = JSON.parse((await pool.query("SELECT value FROM game_state WHERE key='bot/withdrawals'")).rows[0]?.value || '{}');
     if (!allWd[key]) return res.json({ ok: false, msg: 'Not found' });
     const now = Date.now();
     const LOCK_MS = 3 * 60 * 1000;
     if (allWd[key].status === 'accepted' && allWd[key].acceptedBy !== agentId && now - (allWd[key].acceptedAt || 0) < LOCK_MS) {
       return res.json({ ok: false, msg: '⚠️ ሌላ Agent ወስዷል!' });
     }
-    const myActive = Object.entries(allWd).find(
-      ([k, v]) => v.status === 'accepted' && v.acceptedBy === agentId && k !== key
-    );
+    const myActive = Object.entries(allWd).find(([k, v]) => v.status === 'accepted' && v.acceptedBy === agentId && k !== key);
     if (myActive) return res.json({ ok: false, msg: '⚠️ አሁን ያለህን Request አጠናቅ!' });
     allWd[key].status = 'accepted';
     allWd[key].acceptedBy = agentId;
@@ -1596,9 +1333,7 @@ app.post('/withdrawal-release', async (req, res) => {
   try {
     const { key, agentId } = req.body;
     if (!key || !agentId) return res.json({ ok: false, msg: 'Missing data' });
-    const allWd = JSON.parse(
-      (await pool.query("SELECT value FROM game_state WHERE key='bot/withdrawals'")).rows[0]?.value || '{}'
-    );
+    const allWd = JSON.parse((await pool.query("SELECT value FROM game_state WHERE key='bot/withdrawals'")).rows[0]?.value || '{}');
     if (!allWd[key]) return res.json({ ok: false, msg: 'Not found' });
     if (allWd[key].acceptedBy !== agentId) return res.json({ ok: false, msg: '❌ ይህ request ያንተ አይደለም!' });
     allWd[key].status = 'pending';
@@ -1609,79 +1344,57 @@ app.post('/withdrawal-release', async (req, res) => {
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
 
-app.post(
-  '/withdrawal-paid',
-  multer({ storage: multer.memoryStorage() }).single('photo'),
-  async (req, res) => {
-    try {
-      const { key, agentId } = req.body;
-      const file = req.file;
-      if (!key || !agentId) return res.json({ ok: false, msg: 'Missing data' });
-      const allWd = JSON.parse(
-        (await pool.query("SELECT value FROM game_state WHERE key='bot/withdrawals'")).rows[0]?.value || '{}'
-      );
-      const wd = allWd[key];
-      if (!wd) return res.json({ ok: false, msg: 'Not found' });
-      if (wd.acceptedBy !== agentId) return res.json({ ok: false, msg: '❌ ይህ request ያንተ አይደለም!' });
-
-      const uid = String(wd.user_id);
-      const amount = wd.amount || 0;
-      const method = wd.method || 'ባንክ';
-      const account = wd.account || '—';
-      const BOT_TOKEN = process.env.BOT_TOKEN || '';
-
-      if (file && BOT_TOKEN) {
-        try {
-          const boundary = '----FormBoundary' + Date.now();
-          const caption = `✅ ${amount} ብር በ ${method} ተላከ!\n📋 Account: ${account}`;
-          const body = Buffer.concat([
-            Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${uid}\r\n`),
-            Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption}\r\n`),
-            Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="screenshot.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
-            file.buffer,
-            Buffer.from(`\r\n--${boundary}--\r\n`),
-          ]);
-          await new Promise((resolve) => {
-            const opts = {
-              hostname: 'api.telegram.org',
-              path: `/bot${BOT_TOKEN}/sendPhoto`,
-              method: 'POST',
-              headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length }
-            };
-            const r2 = require('https').request(opts, (r) => { let d=''; r.on('data',c=>d+=c); r.on('end',()=>{console.log('📸 TG photo:',d.slice(0,80));resolve();}); });
-            r2.on('error', () => resolve());
-            r2.write(body); r2.end();
-          });
-        } catch(e) { console.error('❌ TG photo error:', e.message); }
-      }
-
-      allWd[key].status = 'approved';
-      await setState('bot/withdrawals', allWd);
-      await updateAnalytics('totalWithdrawals', amount);
-      await pool.query(
-        'INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
-        [uid, `✅ ${amount} ብር በ ${method} ተላከ!`, Date.now()]
-      );
-      broadcast({ type: 'withdrawal_approved', key, uid, amount });
-      res.json({ ok: true });
-    } catch(e) { res.json({ ok: false, msg: e.message }); }
-  }
-);
+app.post('/withdrawal-paid', multer({ storage: multer.memoryStorage() }).single('photo'), async (req, res) => {
+  try {
+    const { key, agentId } = req.body;
+    const file = req.file;
+    if (!key || !agentId) return res.json({ ok: false, msg: 'Missing data' });
+    const allWd = JSON.parse((await pool.query("SELECT value FROM game_state WHERE key='bot/withdrawals'")).rows[0]?.value || '{}');
+    const wd = allWd[key];
+    if (!wd) return res.json({ ok: false, msg: 'Not found' });
+    if (wd.acceptedBy !== agentId) return res.json({ ok: false, msg: '❌ ይህ request ያንተ አይደለም!' });
+    const uid = String(wd.user_id);
+    const amount = wd.amount || 0;
+    const method = wd.method || 'ባንክ';
+    const account = wd.account || '—';
+    const BOT_TOKEN = process.env.BOT_TOKEN || '';
+    if (file && BOT_TOKEN) {
+      try {
+        const boundary = '----FormBoundary' + Date.now();
+        const caption = `✅ ${amount} ብር በ ${method} ተላከ!\n📋 Account: ${account}`;
+        const body = Buffer.concat([
+          Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${uid}\r\n`),
+          Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption}\r\n`),
+          Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="screenshot.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
+          file.buffer,
+          Buffer.from(`\r\n--${boundary}--\r\n`),
+        ]);
+        await new Promise((resolve) => {
+          const opts = { hostname: 'api.telegram.org', path: `/bot${BOT_TOKEN}/sendPhoto`, method: 'POST', headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length } };
+          const r2 = require('https').request(opts, (r) => { let d=''; r.on('data',c=>d+=c); r.on('end',()=>{console.log('📸 TG photo:',d.slice(0,80));resolve();}); });
+          r2.on('error', () => resolve());
+          r2.write(body); r2.end();
+        });
+      } catch(e) { console.error('❌ TG photo error:', e.message); }
+    }
+    allWd[key].status = 'approved';
+    await setState('bot/withdrawals', allWd);
+    await updateAnalytics('totalWithdrawals', amount);
+    await pool.query('INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)', [uid, `✅ ${amount} ብር በ ${method} ተላከ!`, Date.now()]);
+    broadcast({ type: 'withdrawal_approved', key, uid, amount });
+    res.json({ ok: true });
+  } catch(e) { res.json({ ok: false, msg: e.message }); }
+});
 
 app.post('/agent-verify', async (req, res) => {
   try {
     const { name, idNumber, password } = req.body;
-    const agents = JSON.parse(
-      (await pool.query("SELECT value FROM game_state WHERE key='agents'")).rows[0]?.value || '{}'
-    );
+    const agents = JSON.parse((await pool.query("SELECT value FROM game_state WHERE key='agents'")).rows[0]?.value || '{}');
     const agent = agents[name];
     if (!agent) return res.json({ ok: false, msg: '❌ Agent አልተመዘገበም!' });
-    if (String(agent.id_number) !== String(idNumber))
-      return res.json({ ok: false, msg: '❌ የግል ቁጥር ትክክል አይደለም!' });
-    const agentPass =
-      (await pool.query("SELECT value FROM game_state WHERE key='settings/agent_password'")).rows[0]?.value?.replace(/"/g, '') || 'agent2025';
-    if (password !== agentPass)
-      return res.json({ ok: false, msg: '❌ Password ትክክል አይደለም!' });
+    if (String(agent.id_number) !== String(idNumber)) return res.json({ ok: false, msg: '❌ የግል ቁጥር ትክክል አይደለም!' });
+    const agentPass = (await pool.query("SELECT value FROM game_state WHERE key='settings/agent_password'")).rows[0]?.value?.replace(/"/g, '') || 'agent2025';
+    if (password !== agentPass) return res.json({ ok: false, msg: '❌ Password ትክክል አይደለም!' });
     res.json({ ok: true, agentName: name });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
@@ -1705,10 +1418,7 @@ app.post('/db-set', async (req, res) => {
     if (value === null || value === undefined) {
       await pool.query('DELETE FROM game_state WHERE key=$1', [path]);
     } else {
-      await pool.query(
-        'INSERT INTO game_state(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2',
-        [path, JSON.stringify(value)]
-      );
+      await pool.query('INSERT INTO game_state(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2', [path, JSON.stringify(value)]);
     }
     res.json({ ok: true });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
@@ -1720,15 +1430,10 @@ app.post('/db-push', async (req, res) => {
     if (!path) return res.json({ ok: false });
     const r = await pool.query('SELECT value FROM game_state WHERE key=$1', [path]);
     let existing = {};
-    if (r.rows.length) {
-      try { existing = JSON.parse(r.rows[0].value); } catch { existing = {}; }
-    }
+    if (r.rows.length) { try { existing = JSON.parse(r.rows[0].value); } catch { existing = {}; } }
     const key = String(Date.now()) + Math.random().toString(36).slice(2,6);
     existing[key] = value;
-    await pool.query(
-      'INSERT INTO game_state(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2',
-      [path, JSON.stringify(existing)]
-    );
+    await pool.query('INSERT INTO game_state(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2', [path, JSON.stringify(existing)]);
     res.json({ ok: true, key });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
@@ -1736,74 +1441,40 @@ app.post('/db-push', async (req, res) => {
 app.get('/fix-pending', async (req, res) => {
   try {
     const { uid } = req.query;
-    await pool.query(
-      "INSERT INTO game_state(key,value) VALUES($1,'0') ON CONFLICT(key) DO UPDATE SET value='0'",
-      [`users/${uid}/pending_withdrawal`]
-    );
+    await pool.query("INSERT INTO game_state(key,value) VALUES($1,'0') ON CONFLICT(key) DO UPDATE SET value='0'", [`users/${uid}/pending_withdrawal`]);
     res.json({ ok: true });
   } catch(e) { res.json({ ok: false, msg: e.message }); }
 });
 
-// ══ CLOUDINARY CLEANUP ══
 app.post('/clear-cloudinary', async (req, res) => {
   try {
     const auth = Buffer.from(`${CLOUDINARY_API_KEY}:${CLOUDINARY_API_SECRET}`).toString('base64');
-
-    // Active promos ውስጥ ያሉ photo URLs ይሰበስባል
     const activePromos = await pool.query('SELECT photo_url FROM promotions WHERE active=true AND photo_url IS NOT NULL');
     const activeUrls = new Set(activePromos.rows.map(r => r.photo_url).filter(Boolean));
-
-    // Cloudinary ላይ ያሉ images ሁሉ ያምጣል
     const resources = await new Promise((resolve) => {
-      const options = {
-        hostname: 'api.cloudinary.com',
-        path: `/v1_1/${CLOUDINARY_CLOUD}/resources/image?max_results=100`,
-        method: 'GET',
-        headers: { 'Authorization': `Basic ${auth}` }
-      };
+      const options = { hostname: 'api.cloudinary.com', path: `/v1_1/${CLOUDINARY_CLOUD}/resources/image?max_results=100`, method: 'GET', headers: { 'Authorization': `Basic ${auth}` } };
       const req2 = https.request(options, (r) => {
-        let d = '';
-        r.on('data', c => d += c);
-        r.on('end', () => {
-          try { resolve(JSON.parse(d).resources || []); }
-          catch { resolve([]); }
-        });
+        let d = ''; r.on('data', c => d += c);
+        r.on('end', () => { try { resolve(JSON.parse(d).resources || []); } catch { resolve([]); } });
       });
-      req2.on('error', () => resolve([]));
-      req2.end();
+      req2.on('error', () => resolve([])); req2.end();
     });
-
-    // Active promos ውስጥ የሌሉ images ይሰርዛል
     let deleted = 0;
     for (const resource of resources) {
       const url = resource.secure_url;
       if (!activeUrls.has(url)) {
         await new Promise((resolve) => {
           const postData = JSON.stringify({ public_ids: [resource.public_id] });
-          const options = {
-            hostname: 'api.cloudinary.com',
-            path: `/v1_1/${CLOUDINARY_CLOUD}/resources/image/upload`,
-            method: 'DELETE',
-            headers: {
-              'Authorization': `Basic ${auth}`,
-              'Content-Type': 'application/json',
-              'Content-Length': Buffer.byteLength(postData)
-            }
-          };
+          const options = { hostname: 'api.cloudinary.com', path: `/v1_1/${CLOUDINARY_CLOUD}/resources/image/upload`, method: 'DELETE', headers: { 'Authorization': `Basic ${auth}`, 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) } };
           const req2 = https.request(options, (r) => { r.on('data', ()=>{}); r.on('end', resolve); });
-          req2.on('error', resolve);
-          req2.write(postData); req2.end();
+          req2.on('error', resolve); req2.write(postData); req2.end();
         });
         deleted++;
       }
     }
-
     console.log(`🗑️ Cloudinary cleanup: ${deleted} images deleted`);
     res.json({ ok: true, deleted, total: resources.length, kept: resources.length - deleted });
-  } catch(e) {
-    console.error('❌ Cloudinary cleanup error:', e.message);
-    res.json({ ok: false, msg: e.message });
-  }
+  } catch(e) { console.error('❌ Cloudinary cleanup error:', e.message); res.json({ ok: false, msg: e.message }); }
 });
 
 app.listen(process.env.PORT || 3000, () => console.log('🚀 Server running!'));
