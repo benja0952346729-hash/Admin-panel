@@ -1346,11 +1346,19 @@ async function announceWinner(realBetsTotal, botBetsTotal) {
           `🎮 ጨዋታ ለመቀጠል Bot ይጠቀሙ!`
         ].join('\n');
 
-        const bodyData = JSON.stringify({
-          chat_id: GROUP_ID,
-          text: msg,
-          parse_mode: 'HTML'
-        });
+ const bodyData = JSON.stringify({
+  chat_id: GROUP_ID,
+  text: msg,
+  parse_mode: 'HTML',
+  reply_markup: {
+    inline_keyboard: [[
+      {
+        text: '🎮 Play Now',
+        url: 'https://t.me/Firstanywharebingobot'
+      }
+    ]]
+  }
+});
 
         await new Promise((resolve) => {
           const opts = {
