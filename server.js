@@ -183,7 +183,24 @@ app.get('/tts/winner-announce', async (req, res) => {
     res.send(response.buffer);
   } catch(e) { res.status(500).json({ error: 'TTS failed' }); }
 });
-
+app.get('/tts/congrats/:prize', async (req, res) => {
+  const prize = req.params.prize;
+  try {
+    const response = await new Promise((resolve, reject) => {
+      const text = encodeURIComponent(`ቢንጎ! እንኳን ደስ አለህ! ${prize} ብር አሸነፍክ!`);
+      https.get(`https://translate.google.com/translate_tts?ie=UTF-8&q=${text}&tl=am&client=tw-ob`, {
+        headers: { 'User-Agent': 'Mozilla/5.0' }
+      }, (r) => {
+        const chunks = [];
+        r.on('data', chunk => chunks.push(chunk));
+        r.on('end', () => resolve({ buffer: Buffer.concat(chunks) }));
+        r.on('error', reject);
+      }).on('error', reject);
+    });
+    res.set('Content-Type', 'audio/mpeg');
+    res.send(response.buffer);
+  } catch(e) { res.status(500).json({ error: 'TTS failed' }); }
+});
 app.get('/tts/bingo', async (req, res) => {
   try {
     const response = await new Promise((resolve, reject) => {
