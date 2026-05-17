@@ -1112,7 +1112,7 @@ async function addBotsIfNeeded() {
     await setState('game/prize', newPrize);
     await setState('game/total', newTotal);
     await updateAnalytics('botBet', bet * botsNeeded);
-    await updateAnalytics('houseProfit', -(bet * botsNeeded));
+    
     console.log(`🤖 Added ${botsNeeded} bots. Total cards: ${total}, prize: ${newPrize}`);
   } catch(e) { console.error('❌ addBotsIfNeeded error:', e.message); }
 }
@@ -1399,9 +1399,8 @@ async function announceWinner(realBetsTotal, botBetsTotal) {
     }, 6000);
 
     await updateAnalytics('totalPaidOut', realWinShare);
-const totalBets = realBetsTotal + botBetsTotal;
-const houseCut = totalBets * ((100 - gamePct) / 100);
-await updateAnalytics('houseProfit', houseCut);
+const roundHouseProfit = realBetsTotal - realWinShare;
+await updateAnalytics('houseProfit', roundHouseProfit);
 if (botWon) await updateAnalytics('houseProfit', botWinShare);
 await updateAnalytics('botWin', botWinShare);
 
@@ -1417,9 +1416,10 @@ history[todayIdx].rounds = (history[todayIdx].rounds || 0) + 1;
 if (botWon) history[todayIdx].botWins = (history[todayIdx].botWins || 0) + 1;
 else history[todayIdx].playerWins = (history[todayIdx].playerWins || 0) + 1;
     } else {
-      history.push({
-  date: todayStr,
-  houseProfit: roundHouseProfit + (botWon ? botWinShare : 0),
+  const roundHouseProfit = realBetsTotal - realWinShare;
+  history.push({
+    date: todayStr,
+    houseProfit: roundHouseProfit + (botWon ? botWinShare : 0),
   botBet: botBetsTotal,
   botWin: botWinShare,
   rounds: 1,
@@ -1429,7 +1429,7 @@ else history[todayIdx].playerWins = (history[todayIdx].playerWins || 0) + 1;
     }
     await setState('analytics/history', history.slice(-30));
 
-    console.log(`✅ Round done! realBets:${realBetsTotal} botBets:${botBetsTotal} paidOut:${realWinShare} houseCut:${houseCut} botWon:${botWon}`);
+    console.log(`✅ Round done! realBets:${realBetsTotal} botBets:${botBetsTotal} paidOut:${realWinShare} houseProfit:${roundHouseProfit} botWon:${botWon}`);
   } catch(e) { console.error('❌ announceWinner error:', e.message); }
 }
 
