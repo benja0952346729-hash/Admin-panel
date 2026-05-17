@@ -944,6 +944,12 @@ function getLetter(n) {
   return 'O';
 }
 
+function hashSeed(n){
+  let h = n * 2654435761;
+  h = ((h >>> 16) ^ h) * 0x45d9f3b;
+  h = ((h >>> 16) ^ h) * 0x45d9f3b;
+  return ((h >>> 16) ^ h) >>> 0;
+}
 function generateBoard(seed) {
   function sr(s) { let x = Math.sin(s) * 10000; return x - Math.floor(x); }
   function getNums(min, max, s) {
@@ -964,14 +970,15 @@ function generateBoard(seed) {
 }
 
 function checkWin(board, called) {
+  const calledNums = called.map(Number);
   const g = [];
   for (let i = 0; i < 5; i++) g.push(board.slice(i * 5, (i + 1) * 5));
   for (let r = 0; r < 5; r++)
-    if (g[r].every(n => n === 'FREE' || called.includes(n))) return true;
+    if (g[r].every(n => n === 'FREE' || calledNums.includes(Number(n)))) return true;
   for (let c = 0; c < 5; c++)
-    if ([0,1,2,3,4].every(r => g[r][c] === 'FREE' || called.includes(g[r][c]))) return true;
-  if ([0,1,2,3,4].every(i => g[i][i] === 'FREE' || called.includes(g[i][i]))) return true;
-  if ([0,1,2,3,4].every(i => g[i][4-i] === 'FREE' || called.includes(g[i][4-i]))) return true;
+    if ([0,1,2,3,4].every(r => g[r][c] === 'FREE' || calledNums.includes(Number(g[r][c])))) return true;
+  if ([0,1,2,3,4].every(i => g[i][i] === 'FREE' || calledNums.includes(Number(g[i][i])))) return true;
+  if ([0,1,2,3,4].every(i => g[i][4-i] === 'FREE' || calledNums.includes(Number(g[i][4-i])))) return true;
   return false;
 }
 
@@ -1152,9 +1159,9 @@ async function autoCallNumber(speed) {
     return;
   }
 
-  const neededNums = generateBoard(Number(targetCard.cardId)).filter(n => n !== 'FREE');
-  const allBoards = {};
-  for (let cardId in cardInfoMap) allBoards[cardId] = generateBoard(Number(cardId));
+  const neededNums = generateBoard(hashSeed(Number(targetCard.cardId))).filter(n => n !== 'FREE');
+const allBoards = {};
+for (let cardId in cardInfoMap) allBoards[cardId] = generateBoard(hashSeed(Number(cardId)));
 
   callTimer = setInterval(async () => {
     try {
