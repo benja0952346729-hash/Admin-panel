@@ -1288,7 +1288,7 @@ async function announceWinner(realBetsTotal, botBetsTotal) {
         broadcast({ type: 'balance', uid: w.user, balance: r.rows[0]?.balance || 0 });
         await pool.query(
           'INSERT INTO notifications(uid,message,time,read) VALUES($1,$2,$3,false)',
-          [w.user, `🎉 አሸነፍክ! ${share} ብር balance ላይ ታከለ! Card #${w.cardId}`, Date.now()]
+          [w.user, `🎉 Round ${roundNumber} — አሸነፍክ!\n💰 ${share} ብር balance ላይ ታከለ!\n🎴 Card #${w.cardId}\n🕐 ${new Date().toLocaleTimeString('am-ET')}`, Date.now()]
         );
       }
     }
@@ -1324,6 +1324,66 @@ async function announceWinner(realBetsTotal, botBetsTotal) {
     });
 
     await setState('game/announcement', { type: 'winner', winners, prize, share, time: Date.now(), calledNumbers });
+    // ══ TELEGRAM GROUP WINNER ANNOUNCE ══
+    try {
+      const BOT_TOKEN = process.env.BOT_TOKEN || '';
+      const GROUP_ID = '-1003570659417';
+
+      if (BOT_TOKEN && GROUP_ID) {
+        const winnerLines = winners.map(w =>
+          `🏆 <b>${w.displayName}</b>`
+        ).join('\n');
+
+        const msg = [
+          `🎉 <b>Round ${roundNumber} — አሸናፊ ተገኘ!</b>`,
+          ``,
+          winnerLines,
+          ``,
+          `💰 Prize: <b>${share} ብር</b>`,
+          `🔢 Numbers Called: <b>${calledNumbers.length}</b>`,
+          `🕐 ${new Date().toLocaleTimeString('am-ET')}`,
+          ``,
+          `🎮 ጨዋታ ለመቀጠል Bot ይጠቀሙ!`
+        ].join('\n');
+
+        const bodyData = JSON.stringify({
+          chat_id: GROUP_ID,
+          text: msg,
+          parse_mode: 'HTML'
+        });
+
+        await new Promise((resolve) => {
+          const opts = {
+            hostname: 'api.telegram.org',
+            path: `/bot${BOT_TOKEN}/sendMessage`,
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(bodyData)
+            }
+          };
+          const r2 = https.request(opts, (r) => {
+            let d = '';
+            r.on('data', c => d += c);
+            r.on('end', () => {
+              console.log('📢 Group announce sent:', d.slice(0, 120));
+              resolve();
+            });
+          });
+          r2.on('error', (e) => {
+            console.error('❌ Group announce error:', e.message);
+            resolve();
+          });
+          r2.write(bodyData);
+          r2.end();
+        });
+
+        console.log('✅ Winner announced to Telegram group!');
+      }
+    } catch(e) {
+      console.error('❌ Telegram group announce error:', e.message);
+    }
+    // ══ END TELEGRAM GROUP ANNOUNCE ══
     await setState('game/paid', true);
     await setState('game/pendingWinner', { ...data, announced: true });
 
